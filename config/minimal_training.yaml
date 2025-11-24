@@ -1,0 +1,146 @@
+# Minimal GRPO Training Configuration - 10 Steps for Testing
+# 深度融合AFlow + ROLL的在线学习框架
+
+# ============================================
+# Model Configuration
+# ============================================
+base_model: "Qwen/Qwen2.5-7B-Instruct"
+device_mapping: [0]      # GPU ID
+physical_gpus: [0]       # 实际物理GPU ID
+bf16: false              # 使用float16精度
+
+# ============================================
+# Training Parameters - MINIMAL VERSION
+# ============================================
+# 核心训练目标：10 steps x 4 batch x 6 workflow per batch = 240个工作流
+max_steps: 10                         # ✅ 测试需求：仅10步
+rollout_batch_size: 4                 # ✅ 保持：4 samples per step
+num_return_sequences_in_group: 6      # ✅ 保持：6 workflows per problem (GRPO组)
+
+# Learning & Optimization
+learning_rate: 0.0001
+warmup_steps: 2                     # 减少warmup步数适应10步训练
+gradient_accumulation_steps: 1
+clip_range: 0.2
+max_grad_norm: 1.0
+weight_decay: 0.01
+use_kl_loss: true
+kl_loss_coef: 0.1
+
+# ============================================
+# Temperature Scheduling
+# ============================================
+# ✅ 保持固定温度为0.2（禁用动态调度）
+temperature_schedule:
+  enabled: false              # ❌ 禁用动态调度
+  initial: 0.2                # 固定值
+  final: 0.2                  # 固定值（不使用）
+  warmup_steps: 0             # 不使用
+
+# 生成配置（当temperature_schedule.enabled=false时使用）
+generation_config:
+  temperature: 0.2            # ✅ 固定为0.2
+  max_tokens: 2048
+  top_p: 0.95
+  top_k: 40
+
+# ============================================
+# LoRA Configuration
+# ============================================
+use_lora: true
+lora_rank: 64
+lora_alpha: 32
+lora_dropout: 0.1
+lora_target_modules: "q_proj,v_proj,up_proj,down_proj"
+
+# ============================================
+# Data Configuration
+# ============================================
+data_dir: "data"      # 数据根目录，DataManager会自动查找mixed/{split}_mixed.jsonl
+train_dataset: "data/mixed/train_mixed.jsonl"
+test_dataset: "data/mixed/test_mixed.jsonl"
+
+# 域级别权重配置
+domain_ratios:
+  math: 0.4                 # 数学40%
+  qa: 0.3                   # QA30%
+  code: 0.3                 # Code30%
+
+# ============================================
+# Reward & Evaluation
+# ============================================
+reward_weights:
+  correctness: 0.7          # 正确性权重
+  efficiency: 0.2           # 效率权重
+  code_quality: 0.1         # 代码质量权重
+
+# 评估策略（频繁记录用于测试）
+eval_every: 0               # 禁用在线测试集评估（避免测试集泄露）
+val_samples: 10             # 减少验证样本数
+log_every: 1                # 每1步记录训练指标（详细监控）
+save_every: 10              # ✅ 每10步保存checkpoint（最终保存）
+
+# ============================================
+# Checkpointing & Output
+# ============================================
+output_dir: "checkpoints/qwen25-7b/grpo_minimal"
+checkpointing:
+  save_dir: "checkpoints/qwen25-7b/grpo_minimal"
+
+# ============================================
+# AFlow Configuration
+# ============================================
+aflow_config_path: "config/aflow_llm.yaml"
+aflow_executor_model: "gpt-4o"             # ✅ 执行引擎：使用OpenAI官方gpt-4o
+aflow_operator_descriptions_path: "config/aflow_operators.yaml"
+execution_timeout: 180                     # 执行超时（秒）
+
+# ============================================
+# Experience Buffer (高质量样本存储)
+# ============================================
+experience_buffer:
+  buffer_size: 20              # 减少buffer size适应测试
+  reward_threshold: 8.0        # 仅保存reward>=8.0的样本
+  persistence_dir: "data/experience_buffer"
+
+# ============================================
+# Prompt Optimization (Layer 1)
+# ============================================
+prompt_optimizer:
+  enabled: false              # ❌ 测试时禁用动态提示词优化
+
+# ============================================
+# Operator Prompt Enhancement (Layer 2)
+# ============================================
+operator_prompt_enhancer:
+  enabled: false              # ❌ 测试时禁用Operator提示词增强
+
+# ============================================
+# W&B Monitoring
+# ============================================
+wandb:
+  enabled: true
+  project: "aflow-roll-minimal-test"
+  run_name: "grpo-10steps-4batch-6workflows-test"
+  # api_key从环境变量读取: WANDB_API_KEY
+
+# ============================================
+# 训练说明 - MINIMAL VERSION
+# ============================================
+# 总样本数：10 steps × 4 batch × 6 workflows = 240 个工作流生成和执行
+#
+# 测试目标：
+# 1. 验证整个训练流程无报错
+# 2. 测试数据加载、模型生成、AFlow执行、奖励计算、权重更新
+# 3. 确保所有模块正常工作
+# 4. 获得可用的10步训练模型用于后续6数据集评估
+#
+# 关键配置确认：
+# ✅ max_steps: 10（测试版）
+# ✅ rollout_batch_size: 4
+# ✅ num_return_sequences_in_group: 6
+# ✅ save_every: 10（每10步保存，即最终保存）
+# ✅ temperature: 固定为0.2（非动态）
+# ✅ domain_ratios: math 40%, qa 30%, code 30%
+# ✅ 5:1数据分割（train:test=83.3%:16.7%）
+# ✅ 禁用复杂优化功能（专注核心流程测试）

@@ -1,0 +1,22 @@
+# AFlow LLM Configuration
+# Primary executor: gpt-4o (OpenAI official API)
+# Used for workflow execution and operator calls
+
+models:
+  "gpt-4o":                          # ✅ 主执行模型（推荐使用）
+    api_type: "openai"
+    base_url: "https://api.openai.com/v1"
+    api_key: "${OPENAI_API_KEY}"
+    model_name: "gpt-4o"
+    temperature: 0                    # 确定性执行
+    top_p: 1
+
+  # Legacy configuration (deprecated - kept for backward compatibility)
+  "gpt-oss-120b":                    # ⚠️  已弃用（仅向后兼容）
+    api_type: "openai"
+    base_url: "${OPENAI_BASE_URL}"
+    api_key: "${OPENAI_API_KEY}"
+    model_name: "${GPT_OSS_MODEL_PATH}"
+    temperature: 0
+    top_p: 1
+    no_proxy: "localhost,127.0.0.1"
