@@ -107,6 +107,13 @@ class WorkflowValidator:
             validation_details['async_calls_valid'] = True
 
         # 7. 特定类型检查
+        # L2.2: QA 强制严格验证 - 禁止使用 Test 操作符
+        if problem_type == 'qa':
+            qa_issues = self._check_qa_workflow(code)
+            if qa_issues:
+                # QA 问题的验证失败直接返回 False（强制严格）
+                return False, f"QA 工作流验证失败: {'; '.join(qa_issues)}", validation_details
+
         if problem_type == 'code':
             code_issues = self._check_code_workflow(tree, code)
             if code_issues:
@@ -183,6 +190,32 @@ class WorkflowValidator:
             # 检查是否有对应的await
             if f'await {call}' not in code:
                 issues.append(f"异步调用缺少await: {call}")
+
+        return issues
+
+    def _check_qa_workflow(self, code: str) -> List[str]:
+        """
+        L2.2: 检查 QA 类型工作流的特殊要求（强制严格）
+
+        QA 工作流不应该使用 Test 操作符，因为 QA 没有自动化测试用例。
+        """
+        issues = []
+
+        # 规则1: QA 问题不应该使用 Test 操作符（强制严格）
+        if "self.test(" in code or "await test(" in code or ".test(" in code:
+            issues.append("QA 问题不应使用 Test 操作符（QA 没有自动化测试用例）")
+
+        # 规则2: QA 问题不应该使用 Programmer 操作符（非代码相关）
+        if "self.programmer(" in code or "await programmer(" in code or ".programmer(" in code:
+            issues.append("QA 问题不应使用 Programmer 操作符（QA 是文本问题，不是代码问题）")
+
+        # 规则3: QA 问题应该至少使用一个 QA-safe 操作符
+        qa_safe_operators = ['Custom', 'AnswerGenerate', 'Review', 'Revise', 'ScEnsemble']
+        has_qa_operator = any(f"self.{op_lower}(" in code for op_lower in
+                             [op.lower() for op in qa_safe_operators])
+
+        if not has_qa_operator:
+            issues.append(f"QA 工作流应该至少使用一个 QA-safe 操作符: {', '.join(qa_safe_operators)}")
 
         return issues
 

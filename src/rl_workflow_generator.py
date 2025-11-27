@@ -152,6 +152,48 @@ Available Operators:
    Call: await self.sc_ensemble(solutions=list, problem=str)
    Returns: {{'response': str}}
 
+"""
+
+        # L2.1: 添加问题类型特定的约束
+        if problem_type == "qa":
+            problem_specific = """
+⚠️  SPECIAL CONSTRAINTS FOR QA PROBLEMS (problem_type="qa"):
+- DO NOT use Test operator! (QA has no automated test cases)
+- DO NOT use Programmer operator! (QA is not code-related)
+- DO NOT use CodeReflection operator! (QA is not code-related)
+- MUST use text-based operators: Custom, AnswerGenerate, Review, Revise, ScEnsemble
+- Recommended operators for QA:
+  1. AnswerGenerate: Generate candidate answers from questions
+  2. Review: Validate answer quality and accuracy
+  3. Revise: Improve answers based on feedback
+  4. ScEnsemble: Ensemble multiple answer candidates (if generating multiple)
+  5. Custom: Flexible custom instruction-based answering
+- Expected input: problem (question text)
+- Expected output: (answer_text, cost_float) tuple
+- Never use entry_point or test parameters for QA!
+"""
+        elif problem_type == "code":
+            problem_specific = """
+⚠️  SPECIAL CONSTRAINTS FOR CODE PROBLEMS (problem_type="code"):
+- MUST use Test operator for validation!
+- MUST use Programmer operator to generate/improve code!
+- Expected inputs: problem (code problem description), entry_point (function name), test (test cases)
+- Expected output: (code_solution, cost_float) tuple
+- Test operator workflow: Programmer → Test → Review/Revise if needed
+"""
+        elif problem_type == "math":
+            problem_specific = """
+⚠️  SPECIAL CONSTRAINTS FOR MATH PROBLEMS (problem_type="math"):
+- DO NOT use Test or Programmer operators! (Not suitable for math)
+- Recommended operators: Custom, AnswerGenerate, Review, Revise
+- Expected input: problem (math problem description)
+- Expected output: (solution_text, cost_float) tuple
+- Focus on step-by-step reasoning and clear final answer
+"""
+        else:
+            problem_specific = ""
+
+        prompt += problem_specific + """
 Template (complete the __call__ method):
 
 import workspace.{problem_type}.workflows.template.operator as operator

@@ -230,11 +230,11 @@ class GRPOTrainer:
         print("\n🎯 初始化奖励计算器...")
         self.reward_computer = RewardComputer(
             reward_weights=self.config.get('reward_weights'),
-            use_llm_judge=True,  # 启用LLM Judge (gpt-4o)
+            use_llm_judge=True,  # 启用LLM Judge (gpt-4o-mini)
             llm_config={
                 "base_url": "https://api.openai.com/v1",
                 "api_key": os.getenv("OPENAI_API_KEY"),
-                "model_name": "gpt-4o"
+                "model_name": "gpt-4o-mini"
             }
         )
 
@@ -386,8 +386,29 @@ class GRPOTrainer:
                         test=sample.get('test', '')  # NEW: pass test cases for HumanEval
                     )
 
-                    # 计算奖励
-                    if metadata['success']:
+                    # 🔴 真正的解决方案：区分验证失败和执行失败
+                    if metadata.get('validation_failed', False):
+                        # 工作流验证失败（被拒绝）
+                        # 这意味着 RL 生成了不符合约束的工作流
+                        # 给予一个清晰的惩罚信号，让 RL 学到这个约束
+
+                        reward = -3.0  # 验证失败惩罚（比执行失败 -10 轻）
+                        correctness = -3.0
+                        correctness_scores.append(correctness)
+                        group_correctness.append(correctness)
+
+                        validation_error = metadata.get('validation_error', 'Unknown')
+                        print(f"  ⚠️  验证失败 ({validation_error[:30]}) → 惩罚 {reward}")
+
+                        # wandb 日志
+                        wandb.log({
+                            f"sample/{problem_type}/validation_failed": 1,
+                            f"sample/{problem_type}/reward": reward,
+                            f"sample/step": step,
+                        })
+
+                    elif metadata['success']:
+                        # 工作流验证成功且执行成功
                         reward = self.reward_computer.compute_reward(
                             problem=problem,
                             prediction=answer,
@@ -419,7 +440,9 @@ class GRPOTrainer:
 
                         print(f"  {status_icon} 正确性评分: {correctness:.1f}/10.0 | 预测: {str(answer)[:50]} | 真值: {str(ground_truth)[:50]}")
                     else:
-                        reward = -10.0  # 执行失败惩罚
+                        # 工作流验证成功但执行失败
+                        reward = -10.0  # 执行失败惩罚（严重）
+                        correctness = -10.0
                         correctness_scores.append(-10.0)
                         group_correctness.append(-10.0)
                         print(f"  ❌ 执行失败 | 真值: {str(ground_truth)[:50]}")

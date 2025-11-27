@@ -91,7 +91,7 @@ checkpointing:
 # AFlow Configuration
 # ============================================
 aflow_config_path: "config/aflow_llm.yaml"
-aflow_executor_model: "gpt-4o"             # ✅ 执行引擎：使用OpenAI官方gpt-4o
+aflow_executor_model: "gpt-4o-mini"             # ✅ 执行引擎：使用OpenAI官方gpt-4o-mini
 aflow_operator_descriptions_path: "config/aflow_operators.yaml"
 execution_timeout: 180                     # 执行超时（秒）
 

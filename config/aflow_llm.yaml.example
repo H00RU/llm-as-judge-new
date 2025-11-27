@@ -1,13 +1,13 @@
 # AFlow LLM Configuration
-# Primary executor: gpt-4o (OpenAI official API)
+# Primary executor: gpt-4o-mini (OpenAI official API)
 # Used for workflow execution and operator calls
 
 models:
-  "gpt-4o":                          # ✅ 主执行模型（推荐使用）
+  "gpt-4o-mini":                          # ✅ 主执行模型（推荐使用）
     api_type: "openai"
     base_url: "https://api.openai.com/v1"
     api_key: "${OPENAI_API_KEY}"
-    model_name: "gpt-4o"
+    model_name: "gpt-4o-mini"
     temperature: 0                    # 确定性执行
     top_p: 1
 

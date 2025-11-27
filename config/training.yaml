@@ -91,7 +91,7 @@ checkpointing:
 # AFlow Configuration
 # ============================================
 aflow_config_path: "config/aflow_llm.yaml"
-aflow_executor_model: "gpt-4o"             # ✅ 执行引擎：使用OpenAI官方gpt-4o
+aflow_executor_model: "gpt-4o-mini"             # ✅ 执行引擎：使用OpenAI官方gpt-4o-mini
 aflow_operator_descriptions_path: "config/aflow_operators.yaml"
 execution_timeout: 180                     # 执行超时（秒）
 
@@ -133,7 +133,7 @@ wandb:
 # 1. 采样：batch_size=4，从mixed数据集（math:qa:code=4:3:3）均衡采样
 # 2. 生成：每个sample生成6个workflow（GRPO组）
 # 3. 执行：AFlow执行器运行workflows，超时180秒
-# 4. 奖励：LLM Judge（gpt-4o）计算奖励
+# 4. 奖励：LLM Judge（gpt-4o-mini）计算奖励
 # 5. 更新：GRPO优化器更新LoRA权重
 # 6. 验证：每10步在验证集评估一次
 #

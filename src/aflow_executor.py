@@ -30,13 +30,149 @@ sys.path.insert(0, os.path.join(aflow_path, 'workspace'))
 from scripts.async_llm import create_llm_instance, LLMsConfig
 from scripts import operators as operator_module
 
+
+class AsyncOpenAILLMWrapper:
+    """
+    OpenAI 异步LLM包装器 - 作为Fallback备用LLM
+
+    实现AsyncLLM接口，与主LLM兼容的异步接口
+    当主LLM初始化失败时使用作为Tier 2备用方案
+    """
+
+    def __init__(self, api_key: str, model: str = "gpt-4o-mini",
+                 base_url: str = "https://api.openai.com/v1",
+                 temperature: float = 0.0, top_p: float = 1.0):
+        """
+        初始化OpenAI异步客户端
+
+        Args:
+            api_key: OpenAI API密钥
+            model: 使用的模型名称
+            base_url: API基础URL
+            temperature: 温度参数
+            top_p: top_p参数
+        """
+        try:
+            from openai import AsyncOpenAI
+        except ImportError:
+            raise ImportError("需要安装openai库: pip install openai")
+
+        self.api_key = api_key
+        self.model = model
+        self.base_url = base_url
+        self.temperature = temperature
+        self.top_p = top_p
+
+        # 初始化OpenAI异步客户端
+        self.client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url
+        )
+
+        # 跟踪使用统计
+        self._total_tokens = 0
+        self._total_input_tokens = 0
+        self._total_output_tokens = 0
+        self._total_cost = 0.0
+        self._call_count = 0
+
+    async def __call__(self, prompt: str, **kwargs) -> str:
+        """
+        调用OpenAI API生成响应
+
+        Args:
+            prompt: 输入提示词
+            **kwargs: 其他参数（被忽略以保持接口兼容）
+
+        Returns:
+            生成的响应文本
+        """
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.temperature,
+                top_p=self.top_p,
+                max_tokens=2048
+            )
+
+            # 提取响应
+            answer = response.choices[0].message.content
+
+            # 跟踪使用统计
+            if hasattr(response, 'usage') and response.usage:
+                self._total_input_tokens += response.usage.prompt_tokens
+                self._total_output_tokens += response.usage.completion_tokens
+                self._total_tokens += response.usage.total_tokens
+
+                # 估算成本（gpt-4o-mini: $0.15/M input, $0.60/M output）
+                input_cost = (response.usage.prompt_tokens / 1_000_000) * 0.15
+                output_cost = (response.usage.completion_tokens / 1_000_000) * 0.60
+                cost = input_cost + output_cost
+                self._total_cost += cost
+
+            self._call_count += 1
+
+            return answer
+
+        except Exception as e:
+            print(f"❌ OpenAI API调用失败: {e}")
+            raise
+
+    async def call_with_format(self, prompt: str, formatter=None, **kwargs) -> str:
+        """
+        带格式化的调用（兼容性方法）
+
+        Args:
+            prompt: 输入提示词
+            formatter: 格式化器（可选）
+            **kwargs: 其他参数
+
+        Returns:
+            生成的响应文本
+        """
+        response = await self(prompt, **kwargs)
+
+        if formatter and callable(formatter):
+            try:
+                return formatter(response)
+            except Exception as e:
+                print(f"⚠️ 格式化失败: {e}")
+                return response
+
+        return response
+
+    def get_usage_summary(self) -> Dict[str, Any]:
+        """
+        获取使用统计摘要
+
+        Returns:
+            包含token和成本信息的字典
+        """
+        return {
+            "total_tokens": self._total_tokens,
+            "total_input_tokens": self._total_input_tokens,
+            "total_output_tokens": self._total_output_tokens,
+            "total_cost": self._total_cost,
+            "call_count": self._call_count
+        }
+
+    def reset_usage(self):
+        """重置使用统计"""
+        self._total_tokens = 0
+        self._total_input_tokens = 0
+        self._total_output_tokens = 0
+        self._total_cost = 0.0
+        self._call_count = 0
+
+
 class AFlowExecutor:
     """执行RL生成的工作流，使用AFlow的算子"""
 
     def __init__(
         self,
         llm_config_path: str = "config/aflow_llm.yaml",
-        llm_model_name: str = "gpt-4o",  # 使用OpenAI官方gpt-4o
+        llm_model_name: str = "gpt-4o-mini",  # 使用OpenAI官方gpt-4o-mini
         timeout: int = 300,
         operator_enhancer: Optional[Any] = None,
         enable_fallback: bool = True  # 启用Fallback机制
@@ -174,7 +310,15 @@ class AFlowExecutor:
                 workflow_code = fixed_code
             elif self.enable_fallback:
                 print(f"  使用Fallback工作流")
-                return await self._execute_fallback_workflow(problem, problem_type, **kwargs)
+                # 🔴 真正的解决方案：标记这是因为验证失败而执行的 Fallback
+                # 这样 RL 可以获得清晰的惩罚信号，而不是被 Fallback 的结果迷惑
+                answer, cost, metadata = await self._execute_fallback_workflow(problem, problem_type, **kwargs)
+
+                # 添加关键标记：这是验证失败导致的
+                metadata['validation_failed'] = True
+                metadata['validation_error'] = msg  # 拒绝原因
+
+                return answer, cost, metadata
             else:
                 # Fallback禁用，抛出异常
                 raise ValueError(f"工作流代码无效且Fallback已禁用: {msg}")
@@ -314,7 +458,9 @@ class AFlowExecutor:
                 "success": True,
                 "execution_time": execution_time,
                 "cost": cost,
-                "problem_type": problem_type
+                "problem_type": problem_type,
+                "validation_failed": False,  # 🔴 新增：标记这个工作流通过了验证
+                "fallback_executed": False    # 🔴 新增：标记没有执行 Fallback
             }
 
             return answer, cost, metadata
@@ -328,7 +474,9 @@ class AFlowExecutor:
                 "error": "timeout",
                 "execution_time": execution_time,
                 "cost": 0.0,
-                "problem_type": problem_type
+                "problem_type": problem_type,
+                "validation_failed": False,  # 🔴 新增：工作流通过验证，但执行超时了
+                "fallback_executed": False
             }
 
             return None, 0.0, metadata
@@ -345,7 +493,9 @@ class AFlowExecutor:
                 "error": str(e),
                 "execution_time": execution_time,
                 "cost": 0.0,
-                "problem_type": problem_type
+                "problem_type": problem_type,
+                "validation_failed": False,  # 🔴 新增：工作流通过验证，但执行失败了
+                "fallback_executed": False
             }
 
             return None, 0.0, metadata
@@ -420,6 +570,45 @@ class AFlowExecutor:
             print(f"  降级为字符串模式: {self.llm_model_name}")
             return self.llm_model_name
 
+    def _create_qa_fallback_workflow(self) -> str:
+        """
+        创建 QA 专用 Fallback 工作流代码
+
+        特点：
+        - 仅使用 Custom 操作符，不使用 Test
+        - 特别针对 QA 问题的指令
+        - 不处理 entry_point 参数（QA 不需要）
+        """
+        return '''
+import asyncio
+
+class Workflow:
+    def __init__(self, name, llm_config, dataset):
+        self.name = name
+        self.dataset = dataset
+        self.llm = create_llm_instance(llm_config)
+        self.custom = operator.Custom(self.llm)
+
+    async def __call__(self, problem, entry_point=None, test=None):
+        """QA Fallback 工作流：使用 Custom 操作符生成答案，不使用 Test"""
+        instruction = "Answer this question comprehensively. Provide the final answer clearly."
+        result = await self.custom(input=problem, instruction=instruction)
+
+        # 安全提取响应
+        if isinstance(result, dict):
+            response = result.get("response", "")
+        else:
+            response = str(result)
+
+        # 获取成本
+        try:
+            cost = self.llm.get_usage_summary().get("total_cost", 0.0)
+        except:
+            cost = 0.0
+
+        return response, cost
+'''
+
     async def _execute_fallback_workflow(
         self,
         problem: str,
@@ -431,17 +620,23 @@ class AFlowExecutor:
 
         使用最简单但可靠的方式执行
         """
-        print(f"🔄 执行Fallback工作流")
+        print(f"🔄 执行Fallback工作流（类型: {problem_type}）")
         start_time = time.time()
 
         try:
-            # 使用简单的Custom算子
-            if problem_type == "code":
-                func_signature = ", entry_point"
+            # 根据问题类型选择 Fallback 工作流
+            if problem_type == "qa":
+                # QA 专用 Fallback：避免 Test 操作符
+                simple_workflow_code = self._create_qa_fallback_workflow()
+                print(f"  ℹ️  使用 QA 专用 Fallback（不包含 Test 操作符）")
             else:
-                func_signature = ""
+                # 通用 Fallback（用于 code 和 math）
+                if problem_type == "code":
+                    func_signature = ", entry_point"
+                else:
+                    func_signature = ""
 
-            simple_workflow_code = f'''
+                simple_workflow_code = f'''
 import asyncio
 
 class Workflow:
@@ -545,16 +740,106 @@ class Workflow:
         2. 如果失败，返回占位符而不是None
         3. 避免依赖可能失败的Test operator
         """
+        # 保存llm_config_path供FallbackWorkflow使用
+        llm_config_path = self.llm_config_path
 
         class FallbackWorkflow:
             def __init__(self, name: str, llm_config, dataset):
                 self.name = name
                 self.dataset = dataset
+
+                # L1.2: 3-tier LLM 初始化降级机制（增强可靠性）
                 try:
+                    # Tier 1: 尝试主 LLM 初始化
                     self.llm = create_llm_instance(llm_config)
+                    print(f"✅ LLM 初始化成功（主 LLM）")
                 except Exception as e:
-                    print(f"⚠️  LLM初始化失败: {e}")
-                    self.llm = None
+                    print(f"⚠️  主 LLM 初始化失败: {e}")
+
+                    # Tier 2: 使用 OpenAI 备用 LLM
+                    try:
+                        print(f"  尝试使用 OpenAI 备用 LLM...")
+                        import os
+                        import yaml
+
+                        api_key = None
+
+                        # 策略1: 从环境变量获取
+                        api_key = os.getenv("OPENAI_API_KEY")
+
+                        # 策略2: 从YAML配置文件读取
+                        if not api_key:
+                            try:
+                                config_path = Path(llm_config_path).absolute()
+                                if config_path.exists():
+                                    with open(config_path, 'r') as f:
+                                        config_data = yaml.safe_load(f)
+                                        model_config = config_data.get('models', {}).get('gpt-4o-mini', {})
+                                        api_key = model_config.get('api_key')
+
+                                        # 如果是环境变量引用（如 ${OPENAI_API_KEY}），解析它
+                                        if api_key and api_key.startswith('${') and api_key.endswith('}'):
+                                            env_var_name = api_key[2:-1]
+                                            api_key = os.getenv(env_var_name)
+                                        elif api_key and api_key.startswith('$'):
+                                            env_var_name = api_key[1:]
+                                            api_key = os.getenv(env_var_name)
+                            except Exception as e_yaml:
+                                print(f"    ⚠️  无法读取YAML配置: {e_yaml}")
+
+                        # 策略3: 如果llm_config是dict，尝试从中提取
+                        if not api_key and isinstance(llm_config, dict):
+                            api_key = llm_config.get('api_key')
+
+                        if api_key and not api_key.startswith('$'):
+                            # API Key 可用，使用 OpenAI 备用
+                            self.llm = AsyncOpenAILLMWrapper(api_key=api_key)
+                            print(f"✅ OpenAI 备用 LLM 初始化成功")
+                        else:
+                            # 没有有效的 API Key，进入 Tier 3
+                            raise ValueError(f"无有效的 OpenAI API Key (api_key={api_key})")
+
+                    except Exception as e2:
+                        print(f"⚠️  OpenAI 备用 LLM 初始化失败: {e2}")
+
+                        # Tier 3: 最后降级为 None
+                        self.llm = None
+                        print(f"⚠️  LLM 初始化完全失败，将使用占位符返回")
+
+            @staticmethod
+            def _safe_extract_response(result):
+                """
+                L1.3: 安全提取响应，处理多种返回格式
+
+                支持的格式：
+                - dict: 查找 'response' / 'answer' / 'solution' 键
+                - tuple: 取第一个元素
+                - str: 直接返回
+                - None: 返回空字符串
+                """
+                if result is None:
+                    return ""
+
+                # 处理字典格式
+                if isinstance(result, dict):
+                    # 尝试多个可能的键
+                    response = (result.get('response') or
+                               result.get('answer') or
+                               result.get('solution') or
+                               str(result))
+                    return response if response else ""
+
+                # 处理元组格式
+                elif isinstance(result, tuple):
+                    return str(result[0]) if result and result[0] is not None else ""
+
+                # 处理字符串格式
+                elif isinstance(result, str):
+                    return result
+
+                # 其他格式：转为字符串
+                else:
+                    return str(result) if result else ""
 
             async def __call__(self, problem: str, *args, **kwargs):
                 """改进的fallback：不依赖Test operator"""
@@ -580,11 +865,9 @@ Problem:
 
 Provide the final answer clearly."""
 
-                        # 直接调用LLM，不使用任何operator
-                        response = await self.llm.agenerate(
-                            messages=[{"role": "user", "content": prompt}],
-                            max_tokens=2048
-                        )
+                        # 🔴 修复: 使用正确的 AsyncLLM 接口
+                        # AsyncLLM 的方法是 __call__(prompt) 而不是 agenerate(messages=[...])
+                        response = await self.llm(prompt)
 
                         if response:
                             usage = self.llm.get_usage_summary()
@@ -593,32 +876,41 @@ Provide the final answer clearly."""
                             else:
                                 cost = 0.0
 
-                            # 提取response文本
-                            answer = response.get('text') or response.get('response', str(response))
+                            # L1.3: 使用安全提取方法获取响应
+                            # response 可能是字符串或字典，需要处理
+                            if isinstance(response, dict):
+                                answer = response.get('response', str(response))
+                            else:
+                                answer = str(response)
                             return answer, cost
 
                     except Exception as e:
                         print(f"  ⚠️  Fallback直接调用LLM失败: {e}")
 
                 # 策略2: 如果LLM调用也失败，使用Custom operator但不依赖Test
-                try:
-                    print(f"  📝 Fallback: 尝试使用Custom operator")
-                    custom = operator_module.Custom(self.llm)
-                    result = await custom(
-                        input=problem,
-                        instruction="Generate a solution without requiring test validation."
-                    )
+                # 🔴 修复: 只在 self.llm 不是 None 时才尝试
+                if self.llm is not None:
+                    try:
+                        print(f"  📝 Fallback: 尝试使用Custom operator")
+                        custom = operator_module.Custom(self.llm)
+                        result = await custom(
+                            input=problem,
+                            instruction="Generate a solution without requiring test validation."
+                        )
 
-                    if result and 'response' in result:
-                        usage = self.llm.get_usage_summary()
-                        if isinstance(usage, dict) and "total_cost" in usage:
-                            cost = usage["total_cost"]
-                        else:
-                            cost = 0.0
-                        return result['response'], cost
+                        if result:
+                            # L1.3: 使用安全提取方法获取响应
+                            response_text = self._safe_extract_response(result)
+                            if response_text:
+                                usage = self.llm.get_usage_summary()
+                                if isinstance(usage, dict) and "total_cost" in usage:
+                                    cost = usage["total_cost"]
+                                else:
+                                    cost = 0.0
+                                return response_text, cost
 
-                except Exception as e:
-                    print(f"  ⚠️  Fallback Custom operator失败: {e}")
+                    except Exception as e:
+                        print(f"  ⚠️  Fallback Custom operator失败: {e}")
 
                 # 策略3: 所有策略都失败，返回占位符而不是None
                 print(f"  ⚠️  所有fallback策略都失败，返回占位符")
@@ -637,7 +929,7 @@ async def test_executor():
     # 创建执行器
     executor = AFlowExecutor(
         llm_config_path="config/aflow_llm.yaml",
-        llm_model_name="gpt-4o",
+        llm_model_name="gpt-4o-mini",
         timeout=60
     )
 

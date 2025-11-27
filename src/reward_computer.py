@@ -64,10 +64,10 @@ class RewardComputer:
         print(f"✅ 10分制奖励计算器初始化完成")
         print(f"  模式: 正确性分数 [-10, 10] → 归一化奖励 [0, 1]")
         print(f"  答案提取器: {'启用' if use_answer_extractor else '禁用'}")
-        print(f"  LLM Judge: {'启用 (gpt-4o)' if use_llm_judge else '禁用'}")
+        print(f"  LJM Judge: {'启用 (gpt-4o-mini)' if use_llm_judge else '禁用'}")
 
     def _init_llm_judge_client(self, llm_config: Optional[Dict]):
-        """初始化LLM Judge客户端（使用OpenAI gpt-4o）"""
+        """初始化LLM Judge客户端（使用OpenAI gpt-4o-mini）"""
         try:
             from openai import OpenAI
             import yaml
@@ -77,7 +77,7 @@ class RewardComputer:
             default_config = {
                 "base_url": "https://api.openai.com/v1",
                 "api_key": os.getenv("OPENAI_API_KEY", "sk-xxx"),  # 备用：从环境变量读取OpenAI API Key
-                "model_name": "gpt-4o"  # 使用gpt-4o
+                "model_name": "gpt-4o-mini"  # 使用gpt-4o-mini
             }
 
             # 尝试读取aflow配置文件
@@ -85,16 +85,16 @@ class RewardComputer:
                 with open(aflow_config_path, 'r', encoding='utf-8') as f:
                     aflow_config = yaml.safe_load(f)
 
-                # 获取gpt-4o配置
+                # 获取gpt-4o-mini配置
                 models_config = aflow_config.get('models', {})
-                if 'gpt-4o' in models_config:
-                    gpt4o_config = models_config['gpt-4o']
+                if 'gpt-4o-mini' in models_config:
+                    gpt4omini_config = models_config['gpt-4o-mini']
                     default_config = {
-                        "base_url": gpt4o_config.get('base_url', default_config["base_url"]),
-                        "api_key": gpt4o_config.get('api_key', default_config["api_key"]),
-                        "model_name": gpt4o_config.get('model_name', default_config["model_name"])
+                        "base_url": gpt4omini_config.get('base_url', default_config["base_url"]),
+                        "api_key": gpt4omini_config.get('api_key', default_config["api_key"]),
+                        "model_name": gpt4omini_config.get('model_name', default_config["model_name"])
                     }
-                    print(f"  ✅ 从{aflow_config_path}读取gpt-4o配置")
+                    print(f"  ✅ 从{aflow_config_path}读取gpt-4o-mini配置")
             except Exception as config_error:
                 print(f"  ⚠️  无法读取{aflow_config_path}: {config_error}")
                 print(f"  🔄 使用环境变量或默认配置")

@@ -23,13 +23,13 @@ def test_config():
     models = aflow_config.get('models', {})
     print(f"   模型配置数量: {len(models)}")
 
-    if 'gpt-4o' in models:
-        print("   ✅ 找到 gpt-4o 配置（主执行模型）")
-        model_cfg = models['gpt-4o']
+    if 'gpt-4o-mini' in models:
+        print("   ✅ 找到 gpt-4o-mini 配置（主执行模型）")
+        model_cfg = models['gpt-4o-mini']
         print(f"      base_url: {model_cfg.get('base_url')}")
         print(f"      model_name: {model_cfg.get('model_name')}")
     else:
-        print("   ❌ 未找到 gpt-4o 配置")
+        print("   ❌ 未找到 gpt-4o-mini 配置")
         print(f"   可用的模型: {list(models.keys())}")
         return False
 
@@ -44,10 +44,10 @@ def test_config():
 
     executor_model = training_config.get('aflow_executor_model')
     print(f"   aflow_executor_model: {executor_model}")
-    if executor_model == 'gpt-4o':
-        print("   ✅ 正确配置为 gpt-4o（OpenAI官方API）")
+    if executor_model == 'gpt-4o-mini':
+        print("   ✅ 正确配置为 gpt-4o-mini（OpenAI官方API）")
     else:
-        print(f"   ❌ 错误: 应为 gpt-4o，实际为 {executor_model}")
+        print(f"   ❌ 错误: 应为 gpt-4o-mini，实际为 {executor_model}")
         return False
 
     train_dataset = training_config.get('train_dataset')
@@ -76,7 +76,7 @@ def test_config():
     try:
         from scripts.async_llm import LLMsConfig
         llm_configs = LLMsConfig(models)
-        llm_instance = llm_configs.get('gpt-4o')
+        llm_instance = llm_configs.get('gpt-4o-mini')
         print(f"   ✅ LLMsConfig 加载成功")
         print(f"   LLM实例类型: {type(llm_instance).__name__}")
     except Exception as e:
