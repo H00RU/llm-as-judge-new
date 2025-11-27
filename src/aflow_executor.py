@@ -362,35 +362,11 @@ class AFlowExecutor:
                 )
 
             # 执行（带超时）
-            # For code problems, try passing entry_point and test (HumanEval format)
+            # For code problems, try passing entry_point (NOT test - Test operator finds test cases automatically)
             try:
                 if problem_type == "code":
-                    # Try full HumanEval format first (entry_point + test)
-                    if "entry_point" in kwargs and "test" in kwargs:
-                        try:
-                            result = await asyncio.wait_for(
-                                workflow(problem, kwargs["entry_point"], kwargs["test"]),
-                                timeout=self.timeout
-                            )
-                        except TypeError as e:
-                            # Fallback to just entry_point
-                            if "positional argument" in str(e) or "takes" in str(e):
-                                print(f"  ⚠️  Workflow不支持test参数，尝试只传entry_point")
-                                try:
-                                    result = await asyncio.wait_for(
-                                        workflow(problem, kwargs["entry_point"]),
-                                        timeout=self.timeout
-                                    )
-                                except TypeError:
-                                    print(f"  ⚠️  Workflow不支持entry_point参数，降级为只传problem")
-                                    result = await asyncio.wait_for(
-                                        workflow(problem),
-                                        timeout=self.timeout
-                                    )
-                            else:
-                                raise
-                    elif "entry_point" in kwargs:
-                        # Only entry_point available
+                    # Try with entry_point first
+                    if "entry_point" in kwargs:
                         try:
                             result = await asyncio.wait_for(
                                 workflow(problem, kwargs["entry_point"]),
@@ -406,7 +382,7 @@ class AFlowExecutor:
                             else:
                                 raise
                     else:
-                        # No extra parameters
+                        # No entry_point available
                         result = await asyncio.wait_for(
                             workflow(problem),
                             timeout=self.timeout

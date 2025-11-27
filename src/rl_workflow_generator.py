@@ -118,7 +118,7 @@ class RLWorkflowGenerator:
 CRITICAL: Only use operators listed below with their EXACT parameters!
 CRITICAL: Initialize ALL variables before using them! Never return undefined variables!
 CRITICAL: If a variable is defined inside an if-block, either initialize it before the if-block OR handle both branches!
-CRITICAL: __call__ signature MUST be: async def __call__(self, problem: str, entry_point: str = None, test: str = None)
+CRITICAL: __call__ signature MUST be: async def __call__(self, problem: str, entry_point: str = None)
 CRITICAL: Always check if returned values are dicts before calling .get() on them!
 CRITICAL: Always return (solution_string, cost_float) tuple!
 
@@ -136,8 +136,8 @@ Available Operators:
    Call: await self.programmer(problem=str, analysis=str)
    Returns: {{'code': str, 'output': str}}
 
-4. Test(llm) - Test code with test cases
-   Call: await self.test(problem=str, solution=str, entry_point=str)
+4. Test(llm) - Test code with test cases (uses entry_point to look up test cases automatically)
+   Call: await self.test(problem=str, solution=str, entry_point=str)  ← NO 'test' parameter!
    Returns: {{'result': bool, 'solution': str}}
 
 5. Review(llm) - Review and validate solution
@@ -177,9 +177,13 @@ Available Operators:
 ⚠️  SPECIAL CONSTRAINTS FOR CODE PROBLEMS (problem_type="code"):
 - MUST use Test operator for validation!
 - MUST use Programmer operator to generate/improve code!
-- Expected inputs: problem (code problem description), entry_point (function name), test (test cases)
+- Expected inputs: problem (code problem description), entry_point (function name)
 - Expected output: (code_solution, cost_float) tuple
 - Test operator workflow: Programmer → Test → Review/Revise if needed
+- CRITICAL: Test operator signature is test(problem=str, solution=str, entry_point=str)
+  - Do NOT pass 'test' parameter to Test operator
+  - entry_point identifies which test cases to use (Test finds them automatically)
+  - Correct: test_result = await self.test(problem=problem, solution=code, entry_point=entry_point)
 """
         elif problem_type == "math":
             problem_specific = """
@@ -214,11 +218,11 @@ class Workflow:
         # self.revise = operator.Revise(self.llm)
         # self.sc_ensemble = operator.ScEnsemble(self.llm)
 
-    async def __call__(self, problem: str, entry_point: str = None, test: str = None):
+    async def __call__(self, problem: str, entry_point: str = None):
         # Solve: {problem}
         # MUST return (solution, cost) tuple
         # Example: return solution['response'], self.llm.get_usage_summary()["total_cost"]
-        # Note: entry_point and test are optional, used for code problems (ignored for other types)
+        # Note: entry_point is optional, used for code problems (ignored for other types)
 
         # IMPORTANT: Initialize solution variable before any if-blocks!
         # Good example:
@@ -373,8 +377,8 @@ class Workflow:
         self.llm = create_llm_instance(llm_config)
         self.custom = operator.Custom(self.llm)
 
-    async def __call__(self, problem: str, entry_point: str = None, test: str = None):
-        # entry_point and test are optional parameters for code problems
+    async def __call__(self, problem: str, entry_point: str = None):
+        # entry_point is optional, used for code problems
         solution = await self.custom(input=problem, instruction="Solve this problem step by step.")
         response = solution.get('response', '') if isinstance(solution, dict) else str(solution)
         return response, self.llm.get_usage_summary()["total_cost"]
