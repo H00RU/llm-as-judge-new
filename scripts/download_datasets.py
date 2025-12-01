@@ -8,7 +8,7 @@ from datasets import load_dataset
 import json
 
 class DatasetDownloader:
-    """数据集下载器"""
+    """数据集下载"""
 
     def __init__(self, output_dir="data/raw"):
         self.output_dir = Path(output_dir)
