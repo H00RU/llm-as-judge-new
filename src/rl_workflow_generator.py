@@ -154,45 +154,85 @@ Available Operators:
 
 """
 
-        # L2.1: 添加问题类型特定的约束
+        # L2.1: 添加问题类型特定的约束（方案B：软建议而非硬命令）
         if problem_type == "qa":
             problem_specific = """
-⚠️  SPECIAL CONSTRAINTS FOR QA PROBLEMS (problem_type="qa"):
-- DO NOT use Test operator! (QA has no automated test cases)
-- DO NOT use Programmer operator! (QA is not code-related)
-- DO NOT use CodeReflection operator! (QA is not code-related)
-- MUST use text-based operators: Custom, AnswerGenerate, Review, Revise, ScEnsemble
-- Recommended operators for QA:
-  1. AnswerGenerate: Generate candidate answers from questions
-  2. Review: Validate answer quality and accuracy
-  3. Revise: Improve answers based on feedback
-  4. ScEnsemble: Ensemble multiple answer candidates (if generating multiple)
-  5. Custom: Flexible custom instruction-based answering
-- Expected input: problem (question text)
-- Expected output: (answer_text, cost_float) tuple
-- Never use entry_point or test parameters for QA!
+📋 RECOMMENDED: QA PROBLEMS (problem_type="qa")
+================================================================================
+⚠️  CONSTRAINTS (violation penalty: -5.0 reward):
+  ❌ Avoid Test operator - QA typically has no automated test cases
+     Using Test will likely cause NoneType errors (penalty: -5.0)
+  ❌ Avoid Programmer operator - QA is text-based, not code-related
+     Using Programmer is inefficient (penalty: -5.0)
+  ❌ Avoid entry_point parameter - QA problems don't have entry_point
+     Using entry_point will cause parameter errors (penalty: -5.0)
+
+✅ PREFERRED operators for QA:
+  ✅ Custom(llm) - Most flexible for text-based tasks
+  ✅ AnswerGenerate(llm) - Generate reasoning and answers (RECOMMENDED)
+  ✅ Review(llm) - Validate answer quality
+  ✅ Revise(llm) - Improve answers based on feedback
+  ✅ ScEnsemble(llm) - Ensemble multiple candidates
+
+Example workflow structure for QA:
+  answer = await self.answer_generate(input=problem)
+  # ... optionally review and revise ...
+  return answer['answer'], cost
+
+Note: You can try other operators, but they will receive penalty in reward.
+================================================================================
 """
         elif problem_type == "code":
             problem_specific = """
-⚠️  SPECIAL CONSTRAINTS FOR CODE PROBLEMS (problem_type="code"):
-- MUST use Test operator for validation!
-- MUST use Programmer operator to generate/improve code!
-- Expected inputs: problem (code problem description), entry_point (function name)
-- Expected output: (code_solution, cost_float) tuple
-- Test operator workflow: Programmer → Test → Review/Revise if needed
-- CRITICAL: Test operator signature is test(problem=str, solution=str, entry_point=str)
-  - Do NOT pass 'test' parameter to Test operator
-  - entry_point identifies which test cases to use (Test finds them automatically)
-  - Correct: test_result = await self.test(problem=problem, solution=code, entry_point=entry_point)
+✅ CRITICAL: CODE PROBLEMS (problem_type="code") - REQUIRE Test OPERATOR!
+================================================================================
+MUST use these operators with CODE problems:
+  ✅ Programmer(llm) - Generate and improve Python code
+  ✅ Test(llm) - Validate code with entry_point (CRITICAL!)
+
+Test operator MUST be used to verify code correctness:
+  - Test signature: await self.test(problem=str, solution=str, entry_point=str)
+  - entry_point is the function name you're implementing (e.g., "has_close_elements")
+  - Test operator finds test cases automatically using entry_point
+  - DO NOT pass 'test' parameter - Test finds it automatically!
+
+Example workflow for CODE:
+  code_result = await self.programmer(problem=problem, analysis='')
+  code = code_result['code']
+  test_result = await self.test(problem=problem, solution=code, entry_point=entry_point)
+  if test_result['result']:
+      return code, cost
+  else:
+      # Optionally revise based on test failure
+      ...
+
+CRITICAL: entry_point will NOT be None/empty for code problems!
+================================================================================
 """
         elif problem_type == "math":
             problem_specific = """
-⚠️  SPECIAL CONSTRAINTS FOR MATH PROBLEMS (problem_type="math"):
-- DO NOT use Test or Programmer operators! (Not suitable for math)
-- Recommended operators: Custom, AnswerGenerate, Review, Revise
-- Expected input: problem (math problem description)
-- Expected output: (solution_text, cost_float) tuple
-- Focus on step-by-step reasoning and clear final answer
+📊 RECOMMENDED: MATH PROBLEMS (problem_type="math")
+================================================================================
+⚠️  CONSTRAINTS (violation penalty: -5.0 reward):
+  ❌ Avoid Test operator - Math has no automated test cases
+     Using Test will cause NoneType errors (penalty: -5.0)
+  ❌ Avoid Programmer operator - Math is not code-related
+     Using Programmer is inefficient (penalty: -5.0)
+  ❌ Avoid entry_point parameter - Math problems don't have entry_point
+     Using entry_point will cause parameter errors (penalty: -5.0)
+
+✅ PREFERRED operators for MATH:
+  ✅ Custom(llm) - Flexible mathematical reasoning
+  ✅ AnswerGenerate(llm) - Step-by-step mathematical reasoning (RECOMMENDED)
+  ✅ Review(llm) - Verify mathematical correctness
+  ✅ Revise(llm) - Improve solution based on feedback
+
+Example workflow for MATH:
+  answer = await self.answer_generate(input=problem)
+  return answer['answer'], cost
+
+Note: You can try other operators, but they will receive penalty in reward.
+================================================================================
 """
         else:
             problem_specific = ""

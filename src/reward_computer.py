@@ -300,16 +300,31 @@ Be LENIENT with formatting differences but STRICT with factual/numerical differe
         prediction: Any,
         ground_truth: Any,
         problem_type: str = "math",
-        metadata: Optional[Dict] = None
-    ) -> float:
+        metadata: Optional[Dict] = None,
+        execution_metadata: Optional[Dict] = None  # 新增：执行元数据（包括生成质量）
+    ) -> Dict:
         """
-        计算奖励 - 支持LLM Judge和答案提取两种模式
+        改进的奖励计算 - 区分生成质量和答案质量
+
+        Args:
+            execution_metadata: 包含以下信息：
+                - had_signature_error: 是否有签名错误
+                - auto_fixes_applied: 自动修复列表
+                - validation_failed: 验证是否失败
+                - needed_fallback: 是否需要 Fallback
 
         Returns:
-            reward: 范围 [0.0, 1.0] (归一化后的奖励)
+            {
+                'total': float,           # 总奖励
+                'answer_quality': float,  # 答案质量奖励
+                'generation_quality': float,  # 生成质量奖励
+                'breakdown': dict  # 详细分解
+            }
         """
         metadata = metadata or {}
+        execution_metadata = execution_metadata or {}
 
+        # ========== 部分 1: 答案质量奖励 ==========
         # 使用LLM Judge进行语义比较（所有任务类型）
         is_correct = self._llm_judge_compare(
             problem=problem,
@@ -318,18 +333,80 @@ Be LENIENT with formatting differences but STRICT with factual/numerical differe
             problem_type=problem_type
         )
 
-        # 二元奖励：正确=10分，错误=-5分
-        correctness_score = 10.0 if is_correct else -5.0
+        # 答案质量：正确=10分，错误=-5分
+        answer_quality_score = 10.0 if is_correct else -5.0
 
+        # ========== 部分 2: 生成代码质量奖励 ==========
+        generation_quality_score = 0.0
+
+        # 2a. 检查是否有签名错误（最关键）
+        if execution_metadata.get('had_signature_error', False):
+            generation_quality_score -= 2.0  # 有签名错误，惩罚 -2.0
+        else:
+            generation_quality_score += 1.0  # 没有签名错误，奖励 +1.0
+
+        # 2b. 检查是否需要 Fallback
+        if execution_metadata.get('needed_fallback', False):
+            generation_quality_score -= 1.0  # 需要 Fallback，惩罚 -1.0
+        else:
+            generation_quality_score += 1.0  # 直接成功，奖励 +1.0
+
+        # 2c. 检查验证是否失败
+        if execution_metadata.get('validation_failed', False):
+            generation_quality_score -= 1.0  # 验证失败，惩罚 -1.0
+
+        # 2d. 检查是否有未初始化的operators
+        if execution_metadata.get('had_uninitialized_operators', False):
+            generation_quality_score -= 1.5  # 有未初始化operators，惩罚 -1.5
+        else:
+            if 'had_uninitialized_operators' in execution_metadata:
+                generation_quality_score += 0.5  # 没有未初始化operators，奖励 +0.5
+
+        # ========== 部分 3: 总奖励 ==========
+        total_score = answer_quality_score + generation_quality_score
+
+        # ========== 打印详细的奖励分解 ==========
+        print(f"""
+┌─────────────────────────────────────────┐
+│ 📊 GRPO 奖励计算详解                    │
+├─────────────────────────────────────────┤
+│ 答案质量奖励:     {answer_quality_score:+6.1f}  {'✅ 正确' if is_correct else '❌ 错误'}
+│ 生成质量奖励:     {generation_quality_score:+6.1f}
+│   ├─ 签名: {'✅ 正确 +1.0' if not execution_metadata.get('had_signature_error') else '❌ 错误 -2.0'}
+│   ├─ 执行: {'✅ 直接 +1.0' if not execution_metadata.get('needed_fallback') else '❌ 需要Fallback -1.0'}
+│   ├─ 验证: {'✅ 通过' if not execution_metadata.get('validation_failed') else '❌ 失败 -1.0'}
+│   └─ 初始化: {'✅ 正确 +0.5' if not execution_metadata.get('had_uninitialized_operators') else '❌ 缺失 -1.5'}
+├─────────────────────────────────────────┤
+│ 总奖励:          {total_score:+6.1f}
+└─────────────────────────────────────────┘
+""")
+
+        # 保存到元数据
         if metadata is not None:
-            metadata['correctness_score'] = correctness_score
+            metadata['answer_quality_score'] = answer_quality_score
+            metadata['generation_quality_score'] = generation_quality_score
+            metadata['total_score'] = total_score
             metadata['used_llm_judge'] = True
+            metadata['has_signature_error'] = execution_metadata.get('had_signature_error', False)
 
-        # 归一化到[0, 1]用于GRPO
-        # 使用简单的二元映射，避免复杂的sigmoid
-        normalized_reward = 1.0 if is_correct else 0.0
+        # 归一化到 [-1, 1] 或 [0, 1] 用于 GRPO
+        # 这里使用线性映射，保持分数的相对关系
+        normalized_reward = total_score / 20.0  # 范围 [-0.5, 1.0]（因为最低是 -10, 最高是 +20）
 
-        return normalized_reward
+        return {
+            'total': normalized_reward,
+            'answer_quality': answer_quality_score / 10.0,
+            'generation_quality': generation_quality_score / 4.0,  # 最多 +2.0，所以归一化为 /4
+            'breakdown': {
+                'answer_quality_score': answer_quality_score,
+                'generation_quality_score': generation_quality_score,
+                'total_score': total_score,
+                'is_correct': is_correct,
+                'had_signature_error': execution_metadata.get('had_signature_error', False),
+                'needed_fallback': execution_metadata.get('needed_fallback', False),
+                'validation_failed': execution_metadata.get('validation_failed', False)
+            }
+        }
 
     def _is_correct(
         self,

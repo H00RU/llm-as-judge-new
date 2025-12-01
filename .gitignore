@@ -1,1 +1,21 @@
 data/
+# Sensitive config files
+config/aflow_llm.yaml
+
+# Large model files
+models/
+
+# Cache and build
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Training artifacts
+checkpoints/
+wandb/
+logs/
+
+# Temporary files
+*.txt
+.minimal_training_pid
+test_*.py

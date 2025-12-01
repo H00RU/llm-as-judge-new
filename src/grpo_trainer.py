@@ -386,13 +386,27 @@ class GRPOTrainer:
                         test=sample.get('test', '')  # NEW: pass test cases for HumanEval
                     )
 
-                    # 🔴 真正的解决方案：区分验证失败和执行失败
-                    if metadata.get('validation_failed', False):
-                        # 工作流验证失败（被拒绝）
-                        # 这意味着 RL 生成了不符合约束的工作流
-                        # 给予一个清晰的惩罚信号，让 RL 学到这个约束
+                    # 方案B: 分级的约束处理 - 从硬block改为soft reward学习
 
-                        reward = -3.0  # 验证失败惩罚（比执行失败 -10 轻）
+                    # 第一级：operator-problem type 匹配检查（最基础的约束违反）
+                    if metadata.get('operator_problem_type_mismatch', False):
+                        reward = -5.0  # 基础约束违反惩罚
+                        correctness = -5.0
+                        correctness_scores.append(correctness)
+                        group_correctness.append(correctness)
+
+                        mismatch_type = metadata.get('mismatch_type', 'Unknown')
+                        print(f"  ⚠️  Operator-problem type mismatch ({mismatch_type}) → 惩罚 {reward}")
+
+                        wandb.log({
+                            f"sample/{problem_type}/operator_mismatch": 1,
+                            f"sample/{problem_type}/reward": reward,
+                            f"sample/step": step,
+                        })
+
+                    # 第二级：验证失败（语法/格式错误）
+                    elif metadata.get('validation_failed', False):
+                        reward = -3.0  # 验证失败惩罚（比执行失败轻）
                         correctness = -3.0
                         correctness_scores.append(correctness)
                         group_correctness.append(correctness)
@@ -400,7 +414,6 @@ class GRPOTrainer:
                         validation_error = metadata.get('validation_error', 'Unknown')
                         print(f"  ⚠️  验证失败 ({validation_error[:30]}) → 惩罚 {reward}")
 
-                        # wandb 日志
                         wandb.log({
                             f"sample/{problem_type}/validation_failed": 1,
                             f"sample/{problem_type}/reward": reward,
@@ -409,13 +422,24 @@ class GRPOTrainer:
 
                     elif metadata['success']:
                         # 工作流验证成功且执行成功
-                        reward = self.reward_computer.compute_reward(
+                        # 改进的奖励计算：传入 execution_metadata 以考虑生成质量
+                        reward_result = self.reward_computer.compute_reward(
                             problem=problem,
                             prediction=answer,
                             ground_truth=ground_truth,
                             problem_type=problem_type,
-                            metadata=metadata
+                            metadata=metadata,
+                            execution_metadata=metadata  # 传入执行元数据用于生成质量评估
                         )
+
+                        # 提取总奖励和明细
+                        if isinstance(reward_result, dict):
+                            reward = reward_result['total']
+                            breakdown = reward_result.get('breakdown', {})
+                        else:
+                            # 向后兼容
+                            reward = reward_result
+                            breakdown = {}
 
                         # ✨ 新增：显式计算并记录正确性
                         correctness = self.reward_computer._compute_correctness_reward(
@@ -440,12 +464,36 @@ class GRPOTrainer:
 
                         print(f"  {status_icon} 正确性评分: {correctness:.1f}/10.0 | 预测: {str(answer)[:50]} | 真值: {str(ground_truth)[:50]}")
                     else:
-                        # 工作流验证成功但执行失败
-                        reward = -10.0  # 执行失败惩罚（严重）
-                        correctness = -10.0
-                        correctness_scores.append(-10.0)
-                        group_correctness.append(-10.0)
-                        print(f"  ❌ 执行失败 | 真值: {str(ground_truth)[:50]}")
+                        # 第三级：执行失败 - 根据错误类型分级惩罚（方案B）
+                        error_type = metadata.get('error_type', 'unknown')
+
+                        if error_type == 'empty_answer':
+                            # 答案为空 - 执行到底但无输出
+                            reward = -8.0
+                            correctness = -8.0
+                            error_desc = "empty_answer"
+                        elif error_type == 'code_leakage':
+                            # 代码泄露 - Programmer返回源代码而非执行结果
+                            reward = -7.0
+                            correctness = -7.0
+                            error_desc = "code_leakage"
+                        else:
+                            # 其他执行失败 - 最严重的错误
+                            reward = -10.0
+                            correctness = -10.0
+                            error_desc = metadata.get('error', 'unknown_error')[:30]
+
+                        correctness_scores.append(correctness)
+                        group_correctness.append(correctness)
+
+                        print(f"  ❌ 执行失败 ({error_desc}) → 惩罚 {reward} | 真值: {str(ground_truth)[:50]}")
+
+                        wandb.log({
+                            f"sample/{problem_type}/execution_failed": 1,
+                            f"sample/{problem_type}/error_type/{error_type}": 1,
+                            f"sample/{problem_type}/reward": reward,
+                            f"sample/step": step,
+                        })
 
                 except Exception as e:
                     print(f"  ⚠️  执行错误: {type(e).__name__}: {e}")

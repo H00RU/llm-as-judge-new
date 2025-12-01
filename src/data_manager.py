@@ -11,6 +11,15 @@ from collections import defaultdict
 class DataManager:
     """混合数据集管理器"""
 
+    # 字段映射：将process_datasets.py的标准化格式转换为GRPO训练器期望的格式
+    # process_datasets输出: question, reference_answer, domain, entry_point, test, answer_type, metadata
+    # trainer期望格式: problem, ground_truth, problem_type, entry_point, test, answer_type, metadata
+    FIELD_MAPPING = {
+        "question": "problem",              # 问题内容字段
+        "reference_answer": "ground_truth", # 参考答案字段
+        "domain": "problem_type"            # 问题类型（math/code/qa）
+    }
+
     def __init__(
         self,
         data_dir: str = "data",
@@ -34,6 +43,44 @@ class DataManager:
 
         # 当前迭代位置
         self.current_indices = {"math": 0, "code": 0, "qa": 0}
+
+    def _standardize_to_trainer_format(self, sample: Dict) -> Dict:
+        """
+        将标准化格式（process_datasets.py输出）转换为GRPO训练器期望的格式
+
+        标准化格式（来自process_datasets.py）:
+        - question: 问题内容
+        - reference_answer: 参考答案
+        - domain: 问题类型（math/code/qa）
+        - entry_point: 仅限code类型
+        - test: 仅限code类型
+
+        训练器格式（trainer期望）:
+        - problem: 问题内容
+        - ground_truth: 参考答案
+        - problem_type: 问题类型
+        - entry_point: 仅限code类型
+        - test: 仅限code类型
+        """
+        # 应用字段映射规则
+        mapped_sample = {}
+        for src_field, dst_field in self.FIELD_MAPPING.items():
+            mapped_sample[dst_field] = sample.get(src_field, "")
+
+        # 保留其他必要字段
+        mapped_sample["id"] = sample.get("id", "")
+        mapped_sample["dataset"] = sample.get("dataset", "")
+        mapped_sample["answer_type"] = sample.get("answer_type", "text")
+        mapped_sample["metadata"] = sample.get("metadata", {})
+
+        # 特殊处理：为代码类型添加额外字段
+        if mapped_sample.get("problem_type") == "code":
+            if "entry_point" in sample:
+                mapped_sample["entry_point"] = sample["entry_point"]
+            if "test" in sample:
+                mapped_sample["test"] = sample["test"]
+
+        return mapped_sample
 
     def load_data(self, split: str = "train") -> Dict[str, List[Dict]]:
         """加载指定分割的数据"""
@@ -64,23 +111,8 @@ class DataManager:
                     if line.strip():
                         sample = json.loads(line)
 
-                        # 字段映射：将混合数据集格式转换为GRPO训练器期望格式
-                        mapped_sample = {
-                            "id": sample.get("id", ""),
-                            "problem": sample.get("question", ""),  # question -> problem
-                            "ground_truth": sample.get("reference_answer", ""),  # reference_answer -> ground_truth
-                            "problem_type": sample.get("domain", "math"),  # domain -> problem_type
-                            "dataset": sample.get("dataset", ""),
-                            "answer_type": sample.get("answer_type", "text"),
-                            "metadata": sample.get("metadata", {})
-                        }
-
-                        # 特殊处理：为代码类型添加额外字段
-                        if mapped_sample["problem_type"] == "code":
-                            if "entry_point" in sample:
-                                mapped_sample["entry_point"] = sample["entry_point"]
-                            if "test" in sample:
-                                mapped_sample["test"] = sample["test"]
+                        # 将标准化格式转换为训练器期望的格式
+                        mapped_sample = self._standardize_to_trainer_format(sample)
 
                         problem_type = mapped_sample["problem_type"]
                         data_by_type[problem_type].append(mapped_sample)

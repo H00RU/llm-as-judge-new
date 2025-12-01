@@ -4,22 +4,22 @@
 # ============================================
 # Model Configuration
 # ============================================
-base_model: "Qwen/Qwen2.5-7B-Instruct"
+base_model: "/root/llm-as-judge-new/models"  # ✅ 本地模型路径（无嵌套）
 device_mapping: [0]      # GPU ID
 physical_gpus: [0]       # 实际物理GPU ID
 bf16: false              # 使用float16精度
 
 # ============================================
-# Training Parameters - MINIMAL VERSION
+# Training Parameters - MINIMAL VERSION (对齐到training.yaml)
 # ============================================
-# 核心训练目标：15 steps x 8 batch x 6 workflow per batch = 720个工作流（方案D优化）
-max_steps: 15                         # 🔧 优化：增加到15步，确保充分训练和稳定性
-rollout_batch_size: 8                 # 🔧 优化：增加到8，减少梯度噪声，防止过拟合
+# 核心训练目标：10 steps x 4 batch x 6 workflow per batch = 240个工作流（最小化测试）
+max_steps: 10                         # ✅ 快速测试：10步（用户要求）
+rollout_batch_size: 4                 # ✅ 对齐到training.yaml
 num_return_sequences_in_group: 6      # ✅ 保持：6 workflows per problem (GRPO组)
 
 # Learning & Optimization
-learning_rate: 0.00005  # 🔧 优化：降低从 0.0001 → 0.00005，权重更新更温和，防止激进变化
-warmup_steps: 3                     # 🔧 优化：调整为3步适应15步训练（总步数的20%）
+learning_rate: 2.0e-5   # ✅ 对齐到training.yaml（2.0e-5 = 0.00002）
+warmup_steps: 2                     # ✅ 对齐：10步的20% = 2步
 gradient_accumulation_steps: 1
 clip_range: 0.2
 max_grad_norm: 1.0
@@ -30,28 +30,28 @@ kl_loss_coef: 0.1
 # ============================================
 # Temperature Scheduling
 # ============================================
-# ✅ 保持固定温度为0.2（禁用动态调度）
+# ✅ 对齐到training.yaml：固定温度为0.4（禁用动态调度）
 temperature_schedule:
   enabled: false              # ❌ 禁用动态调度
-  initial: 0.2                # 固定值
-  final: 0.2                  # 固定值（不使用）
+  initial: 0.4                # ✅ 对齐到training.yaml
+  final: 0.4                  # ✅ 对齐到training.yaml
   warmup_steps: 0             # 不使用
 
 # 生成配置（当temperature_schedule.enabled=false时使用）
 generation_config:
-  temperature: 0.2            # ✅ 固定为0.2
-  max_tokens: 2048
+  temperature: 0.4            # ✅ 对齐到training.yaml
+  max_tokens: 4096            # ✅ 对齐到training.yaml（防止截断）
   top_p: 0.95
-  top_k: 40
+  top_k: 50                   # ✅ 对齐到training.yaml
 
 # ============================================
 # LoRA Configuration
 # ============================================
 use_lora: true
-lora_rank: 32  # 🔧 优化：降低从 64 → 32，减少过拟合风险，防止权重退化
-lora_alpha: 16  # 🔧 优化：对应降低 alpha（维持 alpha/rank = 0.5 比例）
-lora_dropout: 0.1
-lora_target_modules: "q_proj,v_proj,up_proj,down_proj"
+lora_rank: 64          # ✅ 对齐到training.yaml
+lora_alpha: 64         # ✅ 对齐到training.yaml（维持 alpha/rank = 1.0 比例）
+lora_dropout: 0.05     # ✅ 对齐到training.yaml
+lora_target_modules: "q_proj,k_proj,v_proj,o_proj"  # ✅ 对齐到training.yaml
 
 # ============================================
 # Data Configuration
@@ -74,11 +74,11 @@ reward_weights:
   efficiency: 0.2           # 效率权重
   code_quality: 0.1         # 代码质量权重
 
-# 评估策略（频繁记录用于测试）
-eval_every: 0               # 禁用在线测试集评估（避免测试集泄露）
-val_samples: 10             # 减少验证样本数
-log_every: 1                # 每1步记录训练指标（详细监控）
-save_every: 5               # 🔧 优化：每5步保存checkpoint（更频繁的检查点，便于恢复）
+# 评估策略（对齐到training.yaml）
+eval_every: 0               # ✅ 禁用在线测试集评估（避免测试集泄露）
+val_samples: 50             # ✅ 对齐到training.yaml
+log_every: 5                # ✅ 对齐到training.yaml（每5步记录训练指标）
+save_every: 5               # ✅ 保留：适合快速测试（每5步保存checkpoint，便于恢复）
 
 # ============================================
 # Checkpointing & Output
@@ -99,50 +99,55 @@ execution_timeout: 180                     # 执行超时（秒）
 # Experience Buffer (高质量样本存储)
 # ============================================
 experience_buffer:
-  buffer_size: 20              # 减少buffer size适应测试
-  reward_threshold: 8.0        # 仅保存reward>=8.0的样本
+  buffer_size: 100             # ✅ 对齐到training.yaml
+  reward_threshold: 8.0        # ✅ 保持相同
   persistence_dir: "data/experience_buffer"
 
 # ============================================
 # Prompt Optimization (Layer 1)
 # ============================================
 prompt_optimizer:
-  enabled: false              # ❌ 测试时禁用动态提示词优化
+  enabled: true              # ✅ 对齐到training.yaml（启用动态提示词优化）
 
 # ============================================
 # Operator Prompt Enhancement (Layer 2)
 # ============================================
 operator_prompt_enhancer:
-  enabled: false              # ❌ 测试时禁用Operator提示词增强
+  enabled: true              # ✅ 对齐到training.yaml（启用Operator提示词增强）
 
 # ============================================
 # W&B Monitoring
 # ============================================
 wandb:
   enabled: true
-  project: "aflow-roll-minimal-test"
-  run_name: "grpo-15steps-8batch-6workflows-tuned-planD"
+  project: "aflow-roll-integration"
+  run_name: "grpo-10steps-4batch-6workflows-minimal-aligned"
   # api_key从环境变量读取: WANDB_API_KEY
 
 # ============================================
-# 训练说明 - OPTIMIZED VERSION (方案D)
+# 训练说明 - MINIMAL VERSION (快速测试)
 # ============================================
-# 总样本数：15 steps × 8 batch × 6 workflows = 720 个工作流生成和执行
+# 总样本数：10 steps × 4 batch × 6 workflows = 240 个工作流生成和执行
 #
-# 优化目标（解决 Step 8 权重退化问题）：
-# 1. 降低 LoRA 秩（64 → 32）防止过拟合
-# 2. 降低学习率（0.0001 → 0.00005）权重更新更温和
-# 3. 增加批次大小（4 → 8）减少梯度噪声
-# 4. 增加训练步数（10 → 15）确保充分学习和稳定性
-# 5. 预期：维持 50-60% 准确率全程，无 Step 8 的权重崩溃
+# 配置说明（对齐到training.yaml）：
+# 1. LoRA秩：64（与training.yaml一致，防止表达能力不足）
+# 2. 学习率：2.0e-5（与training.yaml一致，平衡学习速度）
+# 3. 批次大小：4（与training.yaml一致，标准配置）
+# 4. 温度：0.4（与training.yaml一致，固定不使用动态调度）
+# 5. max_tokens：4096（与training.yaml一致，防止截断）
+# 6. 训练步数：10（快速测试，不同于500步的完整训练）
+# 7. 保存频率：5步（适合快速测试的checkpoint间隔）
 #
-# 关键配置确认（优化后）：
-# 🔧 max_steps: 15（从 10 增加，确保充分训练）
-# 🔧 rollout_batch_size: 8（从 4 增加，减少过拟合）
-# 🔧 learning_rate: 0.00005（从 0.0001 降低 50%）
-# 🔧 lora_rank: 32（从 64 降低 50%，关键优化）
-# 🔧 save_every: 5（每 5 步保存）
+# 关键配置确认（对齐后）：
+# ✅ max_steps: 10（快速测试，用户要求）
+# ✅ rollout_batch_size: 4（对齐到training.yaml）
+# ✅ learning_rate: 2.0e-5（对齐到training.yaml）
+# ✅ lora_rank: 64（对齐到training.yaml）
+# ✅ lora_alpha: 64（对齐到training.yaml，维持alpha/rank=1.0）
+# ✅ lora_dropout: 0.05（对齐到training.yaml）
+# ✅ warmup_steps: 2（对齐比例：10步的20%）
+# ✅ temperature: 0.4（对齐到training.yaml）
+# ✅ max_tokens: 4096（对齐到training.yaml）
+# ✅ save_every: 5（保留：适合quick test）
 # ✅ num_return_sequences_in_group: 6
-# ✅ temperature: 固定为0.2（非动态）
-# ✅ domain_ratios: math 40%, qa 30%, code 30%
-# ✅ 5:1数据分割（train:test=83.3%:16.7%）
+# ✅ domain_ratios: math 40%, qa 30%, code 30%（保持均衡采样）

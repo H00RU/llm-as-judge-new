@@ -107,12 +107,15 @@ class WorkflowValidator:
             validation_details['async_calls_valid'] = True
 
         # 7. 特定类型检查
-        # L2.2: QA 强制严格验证 - 禁止使用 Test 操作符
+        # L2.2: QA 工作流检查（方案B：警告而非硬拒绝）
+        # 改进：操作符冲突现在通过reward在aflow_executor中处理，不再硬拒绝
         if problem_type == 'qa':
             qa_issues = self._check_qa_workflow(code)
             if qa_issues:
-                # QA 问题的验证失败直接返回 False（强制严格）
-                return False, f"QA 工作流验证失败: {'; '.join(qa_issues)}", validation_details
+                # 改为警告而非硬拒绝（方案B：软学习）
+                # RL模型如果违反约束，会在metadata中标记，并在reward中受到-5.0惩罚
+                validation_details['warnings'].extend(qa_issues)
+                # 不再return False，允许workflow继续执行
 
         if problem_type == 'code':
             code_issues = self._check_code_workflow(tree, code)
@@ -299,7 +302,190 @@ class WorkflowValidator:
 
             fixed_code = re.sub(test_pattern, add_entry_point, fixed_code)
 
+        # 4. 修复 __call__ 方法的签名（关键！）
+        # 将任何形式的 async def __call__ 改为标准签名
+        call_sig_pattern = r'async def __call__\s*\([^)]*\):'
+        if re.search(call_sig_pattern, fixed_code):
+            fixed_code = re.sub(
+                call_sig_pattern,
+                'async def __call__(self, problem: str, entry_point: str = None):',
+                fixed_code
+            )
+
         return fixed_code
+
+    def _detect_uninitialized_operators(self, code: str) -> tuple:
+        """
+        检测未初始化的operators
+
+        对比 __init__ 中初始化的operators 和 __call__ 中使用的operators，找出差集
+
+        Returns:
+            (未初始化列表, 使用位置列表)
+        """
+        try:
+            tree = ast.parse(code)
+        except:
+            return [], []
+
+        # 找出 __init__ 中初始化的operators
+        initialized_operators = set()
+        call_method_node = None
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == 'Workflow':
+                for item in node.body:
+                    # 在 __init__ 中找初始化
+                    if isinstance(item, ast.FunctionDef) and item.name == '__init__':
+                        for stmt in ast.walk(item):
+                            # 查找 self.xxx = operator.YYY(...) 的赋值
+                            if isinstance(stmt, ast.Assign):
+                                for target in stmt.targets:
+                                    if isinstance(target, ast.Attribute):
+                                        if isinstance(target.value, ast.Name) and target.value.id == 'self':
+                                            initialized_operators.add(target.attr)
+
+                    # 保存 __call__ 方法节点
+                    if isinstance(item, ast.AsyncFunctionDef) and item.name == '__call__':
+                        call_method_node = item
+
+        # 找出 __call__ 中使用的operators (self.xxx)
+        used_operators = set()
+        if call_method_node:
+            for node in ast.walk(call_method_node):
+                if isinstance(node, ast.Attribute):
+                    if isinstance(node.value, ast.Name) and node.value.id == 'self':
+                        # 排除 self.llm, self.name, self.dataset 等非operator属性
+                        attr_name = node.attr
+                        if attr_name not in ['llm', 'name', 'dataset']:
+                            used_operators.add(attr_name)
+
+        # 找出差集：使用但未初始化的operators
+        uninitialized = list(used_operators - initialized_operators)
+        return uninitialized, list(used_operators)
+
+    def fix_uninitialized_operators(self, code: str) -> tuple:
+        """
+        自动修复未初始化的operators
+
+        在 __init__ 末尾添加缺失的初始化
+
+        Returns:
+            (修复后代码, 是否修复, 修复列表)
+        """
+        uninitialized, _ = self._detect_uninitialized_operators(code)
+
+        if not uninitialized:
+            return code, False, []
+
+        try:
+            tree = ast.parse(code)
+        except:
+            return code, False, []
+
+        # 找到 __init__ 方法并在末尾添加初始化
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == 'Workflow':
+                for i, item in enumerate(node.body):
+                    if isinstance(item, ast.FunctionDef) and item.name == '__init__':
+                        # 在 __init__ 的最后一条语句后添加初始化
+                        # 使用正则表达式方式修改（更安全）
+                        init_pattern = r'(    def __init__\(self[^:]*\):\n(?:.*\n)*?)(    (?:async )?def |\Z)'
+
+                        fixes = []
+                        for op_name in uninitialized:
+                            # 构造初始化语句
+                            init_stmt = f"        self.{op_name} = operator.{op_name.title().replace('_', '')}(self.llm)\n"
+                            fixes.append(op_name)
+
+                        # 在 __init__ 末尾添加初始化
+                        if fixes:
+                            # 找到 __init__ 的结束位置，在最后一个缩进语句后添加
+                            init_section = re.search(r'(    def __init__\(self[^:]*\):\n((?:        .*\n)*?))(    (?:async )?def |\Z)', code, re.MULTILINE)
+                            if init_section:
+                                before = init_section.group(1)
+                                after_start = init_section.start(3)
+                                after = code[after_start:]
+
+                                # 添加所有初始化语句
+                                new_inits = ''.join([f"        self.{op} = operator.{op}(self.llm)\n" for op in uninitialized])
+                                code = code[:after_start] + new_inits + after
+
+                        return code, len(fixes) > 0, fixes
+
+        return code, False, []
+
+    def fix_call_signature(self, code: str) -> tuple:
+        """
+        检查和修复 __call__ 方法的签名
+
+        Returns:
+            (修复后的代码, 是否进行了修复, 修复原因)
+        """
+        import re
+
+        # 期望的正确签名
+        expected_pattern = r'async def __call__\s*\(\s*self\s*,\s*problem\s*:\s*str\s*,\s*entry_point\s*:\s*str\s*=\s*None\s*\)'
+
+        # 检查是否已经是正确的签名
+        if re.search(expected_pattern, code):
+            return code, False, None
+
+        # 检查是否有 __call__ 方法（任何形式）
+        call_pattern = r'async def __call__\s*\([^)]*\):'
+        if re.search(call_pattern, code):
+            # 有 __call__ 但签名错误，执行修复
+            fixed_code = re.sub(
+                call_pattern,
+                'async def __call__(self, problem: str, entry_point: str = None):',
+                code
+            )
+            return fixed_code, True, 'signature_mismatch'
+
+        # 没有 __call__ 方法，返回原代码
+        return code, False, None
+
+    def validate_and_fix_workflow(self, code: str, problem_type: str = 'math') -> tuple:
+        """
+        验证工作流代码，同时进行必要的修复（综合方案）
+
+        这个方法结合了：
+        1. 签名修复（最关键）
+        2. 未初始化operators修复
+        3. 其他常见问题修复
+        4. 完整的代码验证
+
+        Returns:
+            (修复后的代码, 是否有效, 错误信息, 修复操作列表, 签名错误标记, 未初始化operators标记)
+        """
+        fixes_applied = []
+        had_signature_error = False
+        had_uninitialized_operators = False
+
+        # Step 1: 修复签名（最关键的）
+        code, sig_fixed, sig_reason = self.fix_call_signature(code)
+        if sig_fixed:
+            fixes_applied.append('signature_fixed')
+            had_signature_error = True
+            print(f"  🔧 自动修复: __call__ 方法签名已正确")
+
+        # Step 2: 修复未初始化的operators
+        code, uninitialized_fixed, uninitialized_list = self.fix_uninitialized_operators(code)
+        if uninitialized_fixed:
+            fixes_applied.append('uninitialized_operators_fixed')
+            had_uninitialized_operators = True
+            print(f"  🔧 自动修复: 添加缺失的operator初始化 {uninitialized_list}")
+
+        # Step 3: 修复其他常见问题
+        fixed_code = self.fix_common_issues(code)
+        if fixed_code != code:
+            fixes_applied.append('common_issues_fixed')
+            code = fixed_code
+
+        # Step 4: 验证修复后的代码
+        is_valid, msg, validation_details = self.validate_workflow_code(code, problem_type)
+
+        return code, is_valid, msg, fixes_applied, had_signature_error, had_uninitialized_operators
 
 
 def test_validator():

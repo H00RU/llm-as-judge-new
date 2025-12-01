@@ -56,10 +56,34 @@ async def main():
 ╚══════════════════════════════════════════════════════════════╝
     """)
 
-    # 自动配置数据路径映射（确保测试数据可访问）
-    print("\n📋 准备数据环境...")
-    data_setup = DataPathSetup()
-    data_setup.run_all(force=False)
+    # 验证必要的数据文件是否存在
+    print("\n📋 验证数据环境...")
+    from pathlib import Path
+
+    code_data_files = {
+        "humaneval": Path("data/raw/code/humaneval.jsonl"),
+        "mbpp": Path("data/raw/code/mbpp.jsonl"),
+    }
+
+    code_data_ok = all(f.exists() for f in code_data_files.values())
+
+    if code_data_ok:
+        print("✅ 代码数据文件检查通过")
+        # 如果源数据完整，自动设置数据路径映射
+        print("📂 自动配置数据路径映射...")
+        data_setup = DataPathSetup()
+        data_setup.run_all(force=False)
+    else:
+        print("\n⚠️  警告：某些数据文件缺失")
+        print("\n数据文件状态：")
+        for name, path in code_data_files.items():
+            status = "✅" if path.exists() else "❌"
+            print(f"  {status} {path}")
+
+        print("\n⚠️  虽然缺少部分数据，但将继续进行（可能会在训练时出错）")
+        print("   如需完整训练，请先运行：")
+        print("   python scripts/download_datasets.py")
+        print("   python scripts/setup_data_paths.py")
 
     # 创建训练器
     trainer = GRPOTrainer(
