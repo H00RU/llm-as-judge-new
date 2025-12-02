@@ -21,7 +21,9 @@ class RLWorkflowGenerator:
         lora_checkpoint: Optional[str] = None,
         device_ids: List[int] = [2, 3],
         operator_descriptions_path: Optional[str] = None,
-        config: Optional[Dict] = None
+        config: Optional[Dict] = None,
+        shared_model = None,
+        shared_tokenizer = None
     ):
         """
         Args:
@@ -30,6 +32,8 @@ class RLWorkflowGenerator:
             device_ids: 使用的GPU ID列表
             operator_descriptions_path: AFlow算子描述文件路径
             config: 额外配置
+            shared_model: 来自GRPOTrainer的共享模型实例（用于避免重复加载）
+            shared_tokenizer: 来自GRPOTrainer的共享tokenizer实例
         """
         self.base_model = base_model
         self.lora_checkpoint = lora_checkpoint
@@ -45,31 +49,41 @@ class RLWorkflowGenerator:
         print(f"  设备: {self.device}")
         print(f"  GPU: {device_ids}")
 
-        # 加载tokenizer
-        print(f"📥 加载tokenizer: {base_model}")
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            base_model,
-            trust_remote_code=True
-        )
+        # 处理tokenizer：优先使用共享的，否则加载新的
+        if shared_tokenizer is not None:
+            print(f"📥 使用共享的tokenizer（避免重复加载）")
+            self.tokenizer = shared_tokenizer
+        else:
+            # 加载tokenizer
+            print(f"📥 加载tokenizer: {base_model}")
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                base_model,
+                trust_remote_code=True
+            )
 
-        # 设置pad_token
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+            # 设置pad_token
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # 加载模型
-        print(f"📥 加载基座模型: {base_model}")
-        self.model = AutoModelForCausalLM.from_pretrained(
-            base_model,
-            torch_dtype=torch.bfloat16,
-            device_map={"": self.device},
-            trust_remote_code=True
-        )
+        # 处理模型：优先使用共享的，否则加载新的
+        if shared_model is not None:
+            print(f"📥 使用共享的模型实例（避免重复加载）")
+            self.model = shared_model
+        else:
+            # 加载模型
+            print(f"📥 加载基座模型: {base_model}")
+            self.model = AutoModelForCausalLM.from_pretrained(
+                base_model,
+                torch_dtype=torch.bfloat16,
+                device_map={"": self.device},
+                trust_remote_code=True
+            )
 
-        # 加载LoRA权重（如果有）
-        if lora_checkpoint:
-            print(f"📥 加载LoRA检查点: {lora_checkpoint}")
-            self.model = PeftModel.from_pretrained(self.model, lora_checkpoint)
-            self.model.eval()
+            # 加载LoRA权重（如果有）
+            if lora_checkpoint:
+                print(f"📥 加载LoRA检查点: {lora_checkpoint}")
+                self.model = PeftModel.from_pretrained(self.model, lora_checkpoint)
+                self.model.eval()
 
         # 加载算子描述
         self.operator_descriptions = self._load_operator_descriptions(operator_descriptions_path)

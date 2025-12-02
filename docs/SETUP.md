@@ -31,9 +31,19 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 ```bash
 pip install -r requirements.txt
 
-# Verify
+# Verify PyTorch and CUDA
 python -c "import torch; print(f'✓ PyTorch {torch.__version__}'); print(f'✓ CUDA available: {torch.cuda.is_available()}')"
+
+# Verify torchvision compatibility (should be 0.21.0 for torch 2.6.0)
+python -c "import torchvision; print(f'✓ torchvision {torchvision.__version__}')"
 ```
+
+**Note**: `requirements.txt` includes compatible versions:
+- `torch==2.6.0`
+- `torchvision==0.21.0` (matched to torch 2.6.0)
+- `torchaudio==2.6.0` (matched to torch 2.6.0)
+
+This avoids version conflicts during installation.
 
 ### 3. Install Models
 

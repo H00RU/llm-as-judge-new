@@ -693,8 +693,8 @@ class AFlowExecutor:
             # 元数据（方案B：添加operator_problem_type_mismatch标记用于soft learning）
             # 🔧 修复：检查是否存在had_instantiation_error标记，如果有则添加needed_fallback
             if not metadata.get('had_instantiation_error', False):
-                # 正常流程：创建完整的metadata
-                metadata = {
+                # 正常流程：更新metadata（保留之前的had_signature_error等标志！）
+                metadata.update({
                     "success": True,
                     "execution_time": execution_time,
                     "cost": cost,
@@ -704,7 +704,7 @@ class AFlowExecutor:
                     # 新增（方案B）：标记operator-problem type匹配情况
                     "operator_problem_type_mismatch": mismatch_detected,
                     "mismatch_type": mismatch_details.split('\n')[0] if mismatch_details else None
-                }
+                })
             else:
                 # 实例化失败但最终成功的流程：保留had_instantiation_error，添加needed_fallback
                 metadata['success'] = True

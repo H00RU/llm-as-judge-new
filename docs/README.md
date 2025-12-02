@@ -15,13 +15,15 @@
 
 ## 📖 Overview
 
-Baseline training framework for evaluating LLMs on **6 diverse datasets** with mixed-domain training:
+AFlow + GRPO integrated training framework for evaluating LLMs on **6 diverse datasets** with mixed-domain training:
 
 - **Datasets**: GSM8K, MATH (math), SQuAD2.0, HotpotQA (QA), HumanEval, MBPP (code)
-- **Data Strategy**: Train:Test = 5:1 (83.3%:16.7%), domain-balanced mixing (4:3:3)
-- **Models**: Qwen2.5-7B, Qwen-3-8B (LoRA rank-64)
-- **Algorithm**: GRPO (Group Relative Policy Optimization) online learning
-- **Evaluation**: Per-dataset metrics on all 6 test sets
+- **Data Strategy**: Train:Test = 5:1 (83.3%:16.7%), domain-balanced mixing (4:3:3 = Math 40%, QA 30%, Code 30%)
+- **Workflow Generation**: RL policy generates AFlow workflows dynamically
+- **Execution**: gpt-4o-mini executes generated workflows via AFlow operators
+- **Models**: Qwen2.5-7B with LoRA (rank=64, alpha=64)
+- **Algorithm**: GRPO (Group Relative Policy Optimization) with normalized rewards [-1.0, +1.0]
+- **Evaluation**: LLM Judge (gpt-4o-mini) for semantic equivalence checking
 
 ---
 
@@ -100,11 +102,11 @@ Evaluation:
 ```
 data/
 ├── mixed/
-│   ├── train_mixed.jsonl        ← For GRPO training (~160K samples)
-│   ├── test_mixed.jsonl         ← For final eval (mixed 4:3:3)
+│   ├── train_mixed.jsonl        ← For GRPO training (~2K samples, balanced 4:3:3)
+│   ├── test_mixed.jsonl         ← For final eval (~420 samples, balanced 4:3:3)
 │   └── info.json                ← Mixing metadata
 └── test/
-    ├── gsm8k_test.jsonl         ← Independent evals
+    ├── gsm8k_test.jsonl         ← Independent evals (per-dataset test sets)
     ├── math_test.jsonl
     ├── squad2_test.jsonl
     ├── hotpotqa_test.jsonl
@@ -146,19 +148,21 @@ data/
 
 ---
 
-## 📊 Expected Data Volumes
+## 📊 Actual Data Volumes
 
-| Dataset | Domain | Train | Test |
-|---------|--------|-------|------|
-| GSM8K | math | 6.2K | 1.2K |
-| MATH | math | 6.3K | 1.3K |
-| SQuAD2.0 | qa | 73K | 14.6K |
-| HotpotQA | qa | 74K | 14.8K |
-| HumanEval | code | 137 | 27 |
-| MBPP | code | 356 | 71 |
-| **Total** | - | **160K** | **32K** |
+| Dataset | Domain | Raw Samples | Train (5:1 split) | Test (5:1 split) |
+|---------|--------|-------------|-------------------|------------------|
+| GSM8K | math | 7,473 | 6,227 | 1,246 |
+| MATH | math | 12,500 | 10,416 | 2,084 |
+| SQuAD2.0 | qa | 130,319 | 108,599 | 21,720 |
+| HotpotQA | qa | 90,447 | 75,372 | 15,075 |
+| HumanEval | code | 164 | 136 | 28 |
+| MBPP | code | 374 | 311 | 63 |
+| **Total Raw** | - | **241,277** | **201,061** | **40,216** |
 
-After mixing: `train_mixed.jsonl` = 160K samples (Math 40% + QA 30% + Code 30%)
+After balanced mixing (4:3:3 ratio):
+- `train_mixed.jsonl` = **2,071 samples** (Math 40% + QA 30% + Code 30%)
+- `test_mixed.jsonl` = **420 samples** (Math 40% + QA 30% + Code 30%)
 
 ---
 

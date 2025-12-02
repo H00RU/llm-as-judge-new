@@ -181,13 +181,12 @@ class GRPOTrainer:
         # 3. RL工作流生成器（共享已加载的模型）
         print("\n🔧 初始化工作流生成器...")
         self.generator = RLWorkflowGenerator(
-            base_model=self.config['base_model'],  # 传递路径用于加载tokenizer
+            base_model=self.config['base_model'],
             device_ids=self.config['device_mapping'],
-            operator_descriptions_path=self.config.get('aflow_operator_descriptions_path')
+            operator_descriptions_path=self.config.get('aflow_operator_descriptions_path'),
+            shared_model=self.model,          # ✅ 直接传递共享的模型实例，避免重复加载
+            shared_tokenizer=self.tokenizer   # ✅ 直接传递共享的tokenizer实例
         )
-        # 共享已加载的模型（避免重复加载）
-        self.generator.model = self.model
-        self.generator.tokenizer = self.tokenizer
 
         # 4. ExperienceBuffer - 高质量样本管理（需先初始化，用于后续组件）
         print("\n📚 初始化ExperienceBuffer...")

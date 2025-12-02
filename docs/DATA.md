@@ -73,21 +73,29 @@ Within each domain, balance two datasets to 50:50:
 Mix balanced domain pools by ratio math:qa:code = 4:3:3:
 
 ```
-Math pool (12,500) → sample 40% → math_samples
-QA pool (148,276)  → sample 30% → qa_samples
-Code pool (712)    → sample 30% → code_samples
+Domain-balanced pools (after intra-balance):
+├─ Math pool:  20,832 samples (GSM8K + MATH balanced)
+├─ QA pool:    217,198 samples (SQuAD2.0 + HotpotQA balanced)
+└─ Code pool:  622 samples (HumanEval + MBPP balanced)
 
+Cross-domain mixing limited by smallest domain:
 Total available = min(
-  int(12,500 / 0.4),
-  int(148,276 / 0.3),
-  int(712 / 0.3)
-) = 2,373
+  int(20,832 / 0.4),  = 52,080
+  int(217,198 / 0.3), = 723,993
+  int(622 / 0.3)      = 2,073  ← Bottleneck (Code domain)
+) = 2,073
 
-Final amounts:
-├─ math: 2,373 × 0.4 = ~950
-├─ qa:   2,373 × 0.3 = ~712
-└─ code: 2,373 × 0.3 = ~712
-Total: ~2,374 (this scales with available data)
+Final mixed amounts (TRAIN):
+├─ math: 2,071 × 0.40 = 829 samples
+├─ qa:   2,071 × 0.30 = 621 samples
+└─ code: 2,071 × 0.30 = 621 samples
+Total: 2,071 samples
+
+Final mixed amounts (TEST):
+├─ math: 420 × 0.40 = 168 samples
+├─ qa:   420 × 0.30 = 126 samples
+└─ code: 420 × 0.30 = 126 samples
+Total: 420 samples
 ```
 
 ---
@@ -109,14 +117,18 @@ Total: ~2,374 (this scales with available data)
 ### After Mixing (Balanced)
 
 **train_mixed.jsonl**:
-- Math: ~64,043 samples (40%)
-- QA: ~48,032 samples (30%)
-- Code: ~48,032 samples (30%)
-- **Total: ~160,107 samples**
+- Math: 829 samples (40%)
+- QA: 621 samples (30%)
+- Code: 621 samples (30%)
+- **Total: 2,071 samples**
 
-**test_mixed.jsonl**: Same ratio mix, ~32,022 samples
+**test_mixed.jsonl**:
+- Math: 168 samples (40%)
+- QA: 126 samples (30%)
+- Code: 126 samples (30%)
+- **Total: 420 samples**
 
-**data/test/\*_test.jsonl**: Individual test sets (not mixed, for separate eval)
+**data/test/\*_test.jsonl**: Individual test sets (not mixed, full test splits for per-dataset evaluation)
 
 ---
 
@@ -253,16 +265,22 @@ The script will print progress:
   "split_ratio": "5:1 (train:test = 83.3%:16.7%)",
   "domain_intra_balance": "50:50 per domain",
   "cross_domain_ratio": "4:3:3 (math:qa:code)",
-  "total_train": 160107,
-  "total_test": 32022,
+  "total_train": 2071,
+  "total_test": 420,
   "domain_distribution_train": {
-    "math": 64043,
-    "qa": 48032,
-    "code": 48032
+    "math": 829,
+    "qa": 621,
+    "code": 621
+  },
+  "domain_distribution_test": {
+    "math": 168,
+    "qa": 126,
+    "code": 126
   },
   "math_pct": 40.0,
   "qa_pct": 30.0,
-  "code_pct": 30.0
+  "code_pct": 30.0,
+  "bottleneck": "code domain (smallest pool)"
 }
 ```
 

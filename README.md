@@ -6,7 +6,7 @@ A production-ready framework for training language models using **Group Relative
 
 ✅ **Plan B Implementation Complete** (Soft Learning with Metadata Flags)
 - Constraint violations → metadata flags + GRPO penalties (instead of hard blocks)
-- Three-level penalty hierarchy: -5.0 (mismatch), -3.0 (validation), -8.0/-7.0/-10.0 (errors)
+- Normalized penalty system: -0.6 (mismatch), -0.4 (validation), -0.8/-0.7/-1.0 (errors) in [-1.0, +1.0] range
 - 100% test pass rate (26/26 tests)
 - [Details](PLAN_B_SESSION_SUMMARY.md)
 
@@ -102,10 +102,10 @@ llm-as-judge/
    └─ Update weights via GRPO gradients
 
 3. Constraint Learning
-   └─ Operator-problem type mismatch → -5.0 penalty
-   └─ Validation failures → -3.0 penalty
-   └─ Execution errors → -8.0 to -10.0 penalties
-   └─ RL model learns constraints naturally
+   └─ Operator-problem type mismatch → -0.6 penalty (normalized)
+   └─ Validation failures → -0.4 penalty (normalized)
+   └─ Execution errors → -0.8 to -1.0 penalties (normalized)
+   └─ RL model learns constraints naturally through reward signals
 
 4. Monitoring & Evaluation
    └─ W&B tracking (metrics by domain and error type)

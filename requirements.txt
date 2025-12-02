@@ -4,6 +4,8 @@
 
 # Core Deep Learning (已验证兼容)
 torch==2.6.0
+torchvision==0.21.0  # 匹配torch 2.6.0，避免版本冲突
+torchaudio==2.6.0    # 匹配torch 2.6.0，避免版本冲突
 transformers==4.57.1
 peft==0.12.0
 

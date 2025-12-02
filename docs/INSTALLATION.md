@@ -71,19 +71,13 @@ tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-7B-Instruct', cache_dir=
 "
 ```
 
-#### GPT OSS 120B (Optional)
+#### gpt-4o-mini Configuration
 
-If you have access to GPT OSS 120B or want to use a different LLM:
+This project uses OpenAI's gpt-4o-mini for:
+- AFlow workflow execution
+- LLM Judge for semantic equivalence checking
 
-```bash
-# Start vLLM server
-python -m vllm.entrypoints.openai.api_server \
-    --model /path/to/gpt-oss-120b \
-    --port 8002 \
-    --tensor-parallel-size 4
-```
-
-Or use OpenAI API directly by configuring in `.env`.
+Configure in `config/aflow_llm.yaml` with your OpenAI API key.
 
 ### 5. Setup AFlow
 
@@ -98,101 +92,80 @@ cd ..
 python -c "import workspace.code.workflows.template.operator as operator"
 ```
 
-### 6. Configure Environment
+### 6. Configure API Keys
 
-```bash
-# Copy environment template
-cp .env.example .env
+Edit `config/aflow_llm.yaml` to add your OpenAI API key:
 
-# Edit .env with your settings
-nano .env  # or use your preferred editor
+```yaml
+models:
+  "gpt-4o-mini":
+    api_type: "openai"
+    base_url: "https://api.openai.com/v1"
+    api_key: "your-openai-api-key-here"  # Replace with your key
+    model_name: "gpt-4o-mini"
+    temperature: 0
+    top_p: 1
 ```
 
-**Required Environment Variables:**
+**Optional: W&B Monitoring**
 
 ```bash
-# OpenAI API Configuration
-OPENAI_API_KEY=your-api-key-here  # For GPT OSS 120B or OpenAI
-OPENAI_BASE_URL=http://localhost:8002/v1  # vLLM endpoint
-
-# Wandb (Optional, for monitoring)
-WANDB_API_KEY=your-wandb-key
-WANDB_PROJECT=llm-as-judge
-
-# Model Paths
-QWEN_MODEL_PATH=models/qwen2.5-7b-instruct
-GPT_OSS_MODEL_PATH=models/gpt-oss-120b
-
-# AFlow Path
-AFLOW_PATH=./AFlow
-
-# GPU Configuration
-CUDA_VISIBLE_DEVICES=0
+# Set W&B API key (optional, for training visualization)
+export WANDB_API_KEY=your-wandb-key
 ```
+
+If not set, training will run in offline mode.
 
 ### 7. Prepare Configuration Files
 
 ```bash
-# Copy config templates
+# Copy AFlow config template and add your API key
 cp config/aflow_llm.yaml.example config/aflow_llm.yaml
-cp config/training.yaml.example config/training.yaml
+# Edit config/aflow_llm.yaml to add your OpenAI API key
 
-# Edit configs as needed
-nano config/training.yaml
+# training.yaml is already configured with optimal defaults
+# No need to modify unless you want custom settings
 ```
 
-**Key Training Configuration:**
+**Default Training Configuration** (`config/training.yaml`):
+- Model: Qwen2.5-7B-Instruct (auto-downloads from HuggingFace)
+- LoRA: rank=64, alpha=64
+- Batch size: 4
+- Max steps: 500
+- Learning rate: 2.0e-5
 
-```yaml
-# config/training.yaml
-model_name: "models/qwen2.5-7b-instruct"
-physical_gpus: [0]  # GPU indices to use
-rollout_batch_size: 4
-num_return_sequences_in_group: 6
-ppo_epochs: 1
-learning_rate: 5e-6
-```
+All configurations are production-ready out of the box.
 
-### 8. Download or Prepare Datasets
+### 8. Download and Process Datasets
 
 ```bash
-# Create data directory structure
-mkdir -p data/mixed
-mkdir -p data/experience_buffer
+# Download 6 datasets from HuggingFace (GSM8K, MATH, SQuAD2.0, HotpotQA, HumanEval, MBPP)
+python scripts/download_datasets.py
 
-# Option 1: Download sample datasets
-# wget https://example.com/sample_data.tar.gz
-# tar -xzf sample_data.tar.gz -C data/
+# Process and mix datasets (5:1 split, balanced 4:3:3 ratio)
+python scripts/process_datasets.py
 
-# Option 2: Prepare your own datasets
-# See Data Preparation section below
+# This creates:
+# - data/mixed/train_mixed.jsonl (2,071 samples)
+# - data/mixed/test_mixed.jsonl (420 samples)
 ```
 
-**Dataset Format:**
-
-Each JSONL file should contain:
-
-```json
-{"problem": "What is 2+2?", "answer": "4", "type": "math"}
-{"problem": "def add(a, b):\n    return a + b", "answer": "def add(a, b):\n    return a + b", "type": "code"}
-```
+See [DATA.md](DATA.md) for detailed information on data mixing strategy.
 
 ### 9. Verify Installation
 
 ```bash
-# Run quick tests
-python test_integration.py
+# Verify PyTorch and CUDA
+python -c "import torch; print(f'✓ PyTorch {torch.__version__}'); print(f'✓ CUDA: {torch.cuda.is_available()}')"
 
-# Test LLM Judge
-python test_llm_judge.py
+# Verify data is ready
+ls -lh data/mixed/train_mixed.jsonl data/mixed/test_mixed.jsonl
 
-# Test workflow generation
-python -c "
-from src.rl_workflow_generator import RLWorkflowGenerator
-gen = RLWorkflowGenerator(model_path='models/qwen2.5-7b-instruct')
-print('✓ Workflow generator initialized')
-"
+# Verify config
+python -c "import yaml; cfg = yaml.safe_load(open('config/training.yaml')); print('✓ Config loaded')"
 ```
+
+If all checks pass, you're ready to start training!
 
 ## Troubleshooting
 
@@ -220,16 +193,15 @@ pip install -r requirements.txt --upgrade
 export PYTHONPATH=$PYTHONPATH:$(pwd):$(pwd)/AFlow
 ```
 
-#### 3. vLLM Server Not Responding
+#### 3. OpenAI API Key Issues
 
 **Solution:**
 ```bash
-# Check if server is running
-curl http://localhost:8002/v1/models
+# Verify API key is set in config/aflow_llm.yaml
+grep "api_key" config/aflow_llm.yaml
 
-# Restart server with correct parameters
-pkill -f vllm
-python -m vllm.entrypoints.openai.api_server --model /path/to/model --port 8002
+# Test API connection
+python -c "from openai import OpenAI; client = OpenAI(api_key='your-key'); print('✓ API connection OK')"
 ```
 
 #### 4. Slow Training
@@ -259,10 +231,16 @@ If you encounter issues:
 
 After installation:
 
-1. Review the [Quick Start](README.md#quick-start) guide
-2. Check out [example notebooks](examples/)
-3. Read about [configuration options](docs/configuration.md)
-4. Start training: `python train.py --config config/training.yaml`
+1. Review [SETUP.md](SETUP.md) for quick start guide
+2. Read [DATA.md](DATA.md) to understand data mixing
+3. Check [TRAINING.md](TRAINING.md) for training configuration
+4. Start training: `python train.py --model qwen25-7b --device cuda:0`
+
+For background training:
+```bash
+nohup python train.py --model qwen25-7b --device cuda:0 > training.log 2>&1 &
+tail -f training.log  # Monitor progress
+```
 
 ## Upgrading
 
