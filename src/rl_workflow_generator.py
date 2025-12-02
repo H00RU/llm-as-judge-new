@@ -111,16 +111,90 @@ class RLWorkflowGenerator:
         }
 
     def _build_generation_prompt(self, problem: str, problem_type: str) -> str:
-        """构建提示词，明确算子 API"""
+        """构建提示词，明确算子 API（增强版 - 含Few-shot示例）"""
 
-        prompt = f"""Generate a Python Workflow class. Follow the exact template and API signatures.
+        # Few-shot正确示例（最重要的改进）
+        few_shot_example = """━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ CORRECT EXAMPLE - FOLLOW THIS PATTERN EXACTLY:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-CRITICAL: Only use operators listed below with their EXACT parameters!
-CRITICAL: Initialize ALL variables before using them! Never return undefined variables!
-CRITICAL: If a variable is defined inside an if-block, either initialize it before the if-block OR handle both branches!
-CRITICAL: __call__ signature MUST be: async def __call__(self, problem: str, entry_point: str = None)
-CRITICAL: Always check if returned values are dicts before calling .get() on them!
-CRITICAL: Always return (solution_string, cost_float) tuple!
+```python
+import workspace.math.workflows.template.operator as operator
+from scripts.async_llm import create_llm_instance
+from scripts.evaluator import DatasetType
+
+class Workflow:
+    def __init__(self, name: str, llm_config, dataset: DatasetType):
+        self.name = name
+        self.dataset = dataset
+        self.llm = create_llm_instance(llm_config)  # ✓ CORRECT: 'llm' not 'll_m' or 'lll'
+        # Initialize only the operators you will use:
+        self.answer_generate = operator.AnswerGenerate(self.llm)
+        self.review = operator.Review(self.llm)  # ✓ Review not Revise
+
+    async def __call__(self, problem: str, entry_point: str = None):
+        # ✓ CORRECT: Initialize variables BEFORE any if-blocks
+        result = await self.answer_generate(input=problem)
+        # ✓ CRITICAL: Check isinstance before .get() to avoid NoneType errors
+        answer = result.get('answer', '') if isinstance(result, dict) else str(result)
+
+        # Optional: review and improve
+        review_result = await self.review(problem=problem, solution=answer)
+        # ✓ CRITICAL: Always check isinstance before .get()
+        if isinstance(review_result, dict) and not review_result.get('review_result', True):
+            # Improve if needed
+            answer = answer  # Keep as is (or call revise if initialized)
+
+        # ✓ CORRECT: Return tuple (solution, cost)
+        cost = self.llm.get_usage_summary()["total_cost"]  # ✓ CORRECT: 'llm'
+        return answer, cost  # ✓ Both variables always defined
+```
+
+🚫 COMMON MISTAKES - NEVER DO THESE:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+❌ MISTAKE 1: Typos in variable names
+   self.ll_m = ...     → ✅ self.llm = ...
+   self.lll = ...      → ✅ self.llm = ...
+   ll_config           → ✅ llm_config
+
+❌ MISTAKE 2: Using undefined variables
+   if cond: code = ...
+   return code  # ❌ code undefined if cond is False!
+   → ✅ CORRECT:
+   code = None  # Initialize first!
+   if cond: code = ...
+   return code
+
+❌ MISTAKE 3: Calling .get() on non-dict (causes NoneType errors)
+   result = await operator()  # might return str!
+   value = result.get('key')  # ❌ AttributeError if result is str
+   → ✅ CORRECT:
+   value = result.get('key') if isinstance(result, dict) else result
+
+❌ MISTAKE 4: Confusing Review vs Revise operators
+   self.revise = operator.Revise(self.llm)  # ❌ Revise not initialized
+   await self.revise(...)  # ❌ AttributeError: 'Workflow' has no 'revise'
+   → ✅ CORRECT:
+   # In __init__: Initialize what you use
+   self.review = operator.Review(self.llm)  # ✓
+   # In __call__:
+   await self.review(problem=problem, solution=solution)  # ✓
+
+   # If you need Revise, initialize it too:
+   self.revise_op = operator.Revise(self.llm)  # ✓ Different name
+   await self.revise_op(problem=problem, solution=sol, feedback=fb)  # ✓
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+"""
+
+        prompt = few_shot_example + f"""Now generate YOUR Workflow for the following problem.
+
+CRITICAL RULES:
+1. Use EXACT variable names: 'llm' NOT 'll_m', 'lll', or 'll_config'
+2. Initialize ALL variables before if-blocks
+3. Always check isinstance(result, dict) before calling .get()
+4. __call__ signature: async def __call__(self, problem: str, entry_point: str = None)
+5. Always return (solution_string, cost_float) tuple
 
 Available Operators:
 

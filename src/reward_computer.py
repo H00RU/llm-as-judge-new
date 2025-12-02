@@ -336,31 +336,41 @@ Be LENIENT with formatting differences but STRICT with factual/numerical differe
         # 答案质量：正确=10分，错误=-5分
         answer_quality_score = 10.0 if is_correct else -5.0
 
-        # ========== 部分 2: 生成代码质量奖励 ==========
+        # ========== 部分 2: 生成代码质量奖励（温和纠正版）==========
+        # 设计理念：鼓励探索 + 温和纠正，而非严厉惩罚
+        # 语法错误会降低总奖励，但不会完全抵消正确答案的价值
         generation_quality_score = 0.0
 
         # 2a. 检查是否有签名错误（最关键）
         if execution_metadata.get('had_signature_error', False):
-            generation_quality_score -= 2.0  # 有签名错误，惩罚 -2.0
+            generation_quality_score -= 3.0  # 温和惩罚：-3.0（原-5.0过重）
         else:
-            generation_quality_score += 1.0  # 没有签名错误，奖励 +1.0
+            generation_quality_score += 1.5  # 提高正确奖励
 
-        # 2b. 检查是否需要 Fallback
+        # 2b. 检查拼写错误（新增）- ll_m, lll, ll_config等
+        if execution_metadata.get('had_typo_errors', False):
+            generation_quality_score -= 2.5  # 温和惩罚：-2.5（原-4.0过重）
+
+        # 2c. 检查是否有未初始化变量
+        if execution_metadata.get('had_uninitialized_vars', False):
+            generation_quality_score -= 2.0  # 温和惩罚：-2.0（原-3.0过重）
+
+        # 2d. 检查是否需要 Fallback
         if execution_metadata.get('needed_fallback', False):
-            generation_quality_score -= 1.0  # 需要 Fallback，惩罚 -1.0
+            generation_quality_score -= 1.5  # 适度惩罚
         else:
-            generation_quality_score += 1.0  # 直接成功，奖励 +1.0
+            generation_quality_score += 1.5  # 提高成功奖励
 
-        # 2c. 检查验证是否失败
+        # 2e. 检查验证是否失败
         if execution_metadata.get('validation_failed', False):
-            generation_quality_score -= 1.0  # 验证失败，惩罚 -1.0
+            generation_quality_score -= 1.0  # 轻度惩罚
 
-        # 2d. 检查是否有未初始化的operators
+        # 2f. 检查是否有未初始化的operators
         if execution_metadata.get('had_uninitialized_operators', False):
-            generation_quality_score -= 1.5  # 有未初始化operators，惩罚 -1.5
+            generation_quality_score -= 1.0  # 轻度惩罚
         else:
             if 'had_uninitialized_operators' in execution_metadata:
-                generation_quality_score += 0.5  # 没有未初始化operators，奖励 +0.5
+                generation_quality_score += 0.5  # 小奖励
 
         # ========== 部分 3: 总奖励 ==========
         total_score = answer_quality_score + generation_quality_score
@@ -368,16 +378,19 @@ Be LENIENT with formatting differences but STRICT with factual/numerical differe
         # ========== 打印详细的奖励分解 ==========
         print(f"""
 ┌─────────────────────────────────────────┐
-│ 📊 GRPO 奖励计算详解                    │
+│ 📊 GRPO 奖励计算 (温和纠正版)            │
 ├─────────────────────────────────────────┤
 │ 答案质量奖励:     {answer_quality_score:+6.1f}  {'✅ 正确' if is_correct else '❌ 错误'}
 │ 生成质量奖励:     {generation_quality_score:+6.1f}
-│   ├─ 签名: {'✅ 正确 +1.0' if not execution_metadata.get('had_signature_error') else '❌ 错误 -2.0'}
-│   ├─ 执行: {'✅ 直接 +1.0' if not execution_metadata.get('needed_fallback') else '❌ 需要Fallback -1.0'}
+│   ├─ 签名: {'✅ 正确 +1.5' if not execution_metadata.get('had_signature_error') else '❌ 错误 -3.0'}
+│   ├─ 拼写: {'✅ 无误' if not execution_metadata.get('had_typo_errors') else '❌ 错误 -2.5'}
+│   ├─ 未初始化变量: {'✅ 正确' if not execution_metadata.get('had_uninitialized_vars') else '❌ 错误 -2.0'}
+│   ├─ 执行: {'✅ 直接 +1.5' if not execution_metadata.get('needed_fallback') else '❌ 需要Fallback -1.5'}
 │   ├─ 验证: {'✅ 通过' if not execution_metadata.get('validation_failed') else '❌ 失败 -1.0'}
-│   └─ 初始化: {'✅ 正确 +0.5' if not execution_metadata.get('had_uninitialized_operators') else '❌ 缺失 -1.5'}
+│   └─ 初始化: {'✅ 正确 +0.5' if not execution_metadata.get('had_uninitialized_operators') else '❌ 缺失 -1.0'}
 ├─────────────────────────────────────────┤
 │ 总奖励:          {total_score:+6.1f}
+│ 💡 策略: Few-shot教学 + 温和纠正
 └─────────────────────────────────────────┘
 """)
 
