@@ -187,7 +187,7 @@ class WorkflowValidator:
 
         for call in calls:
             # 排除非算子调用
-            if call in ['self.llm', 'self.name', 'self.dataset']:
+            if call in ['self.model', 'self.name', 'self.dataset']:
                 continue
 
             # 检查是否有对应的await
@@ -355,9 +355,9 @@ class WorkflowValidator:
             for node in ast.walk(call_method_node):
                 if isinstance(node, ast.Attribute):
                     if isinstance(node.value, ast.Name) and node.value.id == 'self':
-                        # 排除 self.llm, self.name, self.dataset 等非operator属性
+                        # 排除 self.model, self.name, self.dataset 等非operator属性
                         attr_name = node.attr
-                        if attr_name not in ['llm', 'name', 'dataset']:
+                        if attr_name not in ['model', 'name', 'dataset']:
                             used_operators.add(attr_name)
 
         # 找出差集：使用但未初始化的operators
@@ -395,7 +395,7 @@ class WorkflowValidator:
                         fixes = []
                         for op_name in uninitialized:
                             # 构造初始化语句
-                            init_stmt = f"        self.{op_name} = operator.{op_name.title().replace('_', '')}(self.llm)\n"
+                            init_stmt = f"        self.{op_name} = operator.{op_name.title().replace('_', '')}(self.model)\n"
                             fixes.append(op_name)
 
                         # 在 __init__ 末尾添加初始化
@@ -408,7 +408,7 @@ class WorkflowValidator:
                                 after = code[after_start:]
 
                                 # 添加所有初始化语句
-                                new_inits = ''.join([f"        self.{op} = operator.{op}(self.llm)\n" for op in uninitialized])
+                                new_inits = ''.join([f"        self.{op} = operator.{op}(self.model)\n" for op in uninitialized])
                                 code = code[:after_start] + new_inits + after
 
                         return code, len(fixes) > 0, fixes
@@ -500,19 +500,19 @@ from scripts.async_llm import create_llm_instance
 class Workflow:
     def __init__(self, name, llm_config, dataset):
         self.name = name
-        self.llm = create_llm_instance(llm_config)
-        self.custom = operator.Custom(self.llm)
+        self.model = create_llm_instance(llm_config)
+        self.custom = operator.Custom(self.model)
 
     async def __call__(self, problem):
         result = await self.custom(input=problem, instruction="Solve")
-        return result['response'], self.llm.get_usage_summary()["total_cost"]
+        return result['response'], self.model.get_usage_summary()["total_cost"]
 '''
 
     # 测试用例2：有问题的工作流
     bad_code = '''
 class Workflow:
     def __init__(self, name, llm_config, dataset):
-        self.custom = operator.custom(self.llm)  # 小写错误
+        self.custom = operator.custom(self.model)  # 小写错误
 
     async def __call__(self, problem):
         result = self.custom(input=problem)  # 缺少await

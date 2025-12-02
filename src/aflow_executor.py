@@ -224,7 +224,7 @@ class AFlowExecutor:
                '127.0.0.1' in str(model_config.get('base_url', '')):
                 os.environ['NO_PROXY'] = 'localhost,127.0.0.1'
                 os.environ['no_proxy'] = 'localhost,127.0.0.1'
-                print("  📌 设置 NO_PROXY=localhost,127.0.0.1 (绕过代理访问本地LLM服务)")
+                print("  📌 设置 NO_PROXY=localhost,127.0.0.1 (本地LLM服务无需代理)")
 
             # 直接加载配置
             from scripts.async_llm import LLMsConfig
@@ -393,8 +393,8 @@ class AFlowExecutor:
                 )
 
         elif problem_type == "code":
-            # Code 问题应该使用 Test 来验证
-            # （暂时只检查是否使用了不合适的操作符，不强制必须有 Test）
+            # Code问题：不强制要求Test operator
+            # 原因：Test operator虽然推荐，但不是必需的（Custom也可以生成代码）
             pass
 
         return None
@@ -841,8 +841,8 @@ class Workflow:
     def __init__(self, name, llm_config, dataset):
         self.name = name
         self.dataset = dataset
-        self.llm = create_llm_instance(llm_config)
-        self.custom = operator.Custom(self.llm)
+        self.model = create_llm_instance(llm_config)
+        self.custom = operator.Custom(self.model)
 
     async def __call__(self, problem, entry_point=None, test=None):
         """QA Fallback 工作流：使用 Custom 操作符生成答案，不使用 Test"""
@@ -857,7 +857,7 @@ class Workflow:
 
         # 获取成本
         try:
-            cost = self.llm.get_usage_summary().get("total_cost", 0.0)
+            cost = self.model.get_usage_summary().get("total_cost", 0.0)
         except:
             cost = 0.0
 
@@ -898,8 +898,8 @@ class Workflow:
     def __init__(self, name, llm_config, dataset):
         self.name = name
         self.dataset = dataset
-        self.llm = create_llm_instance(llm_config)
-        self.custom = operator.Custom(self.llm)
+        self.model = create_llm_instance(llm_config)
+        self.custom = operator.Custom(self.model)
 
     async def __call__(self, problem{func_signature}):
         """Simple fallback workflow using only Custom operator"""
@@ -922,7 +922,7 @@ class Workflow:
 
         # Get cost
         try:
-            cost = self.llm.get_usage_summary().get("total_cost", 0.0)
+            cost = self.model.get_usage_summary().get("total_cost", 0.0)
         except:
             cost = 0.0
 
@@ -1006,7 +1006,7 @@ class Workflow:
                 # L1.2: 3-tier LLM 初始化降级机制（增强可靠性）
                 try:
                     # Tier 1: 尝试主 LLM 初始化
-                    self.llm = create_llm_instance(llm_config)
+                    self.model = create_llm_instance(llm_config)
                     print(f"✅ LLM 初始化成功（主 LLM）")
                 except Exception as e:
                     print(f"⚠️  主 LLM 初始化失败: {e}")
@@ -1048,7 +1048,7 @@ class Workflow:
 
                         if api_key and not api_key.startswith('$'):
                             # API Key 可用，使用 OpenAI 备用
-                            self.llm = AsyncOpenAILLMWrapper(api_key=api_key)
+                            self.model = AsyncOpenAILLMWrapper(api_key=api_key)
                             print(f"✅ OpenAI 备用 LLM 初始化成功")
                         else:
                             # 没有有效的 API Key，进入 Tier 3
@@ -1058,7 +1058,7 @@ class Workflow:
                         print(f"⚠️  OpenAI 备用 LLM 初始化失败: {e2}")
 
                         # Tier 3: 最后降级为 None
-                        self.llm = None
+                        self.model = None
                         print(f"⚠️  LLM 初始化完全失败，将使用占位符返回")
 
             @staticmethod
@@ -1100,7 +1100,7 @@ class Workflow:
                 """改进的fallback：不依赖Test operator"""
 
                 # 策略1: 直接调用LLM生成，不经过任何operator
-                if self.llm is not None:
+                if self.model is not None:
                     try:
                         print(f"  📝 Fallback: 直接调用LLM生成解决方案")
 
@@ -1122,10 +1122,10 @@ Provide the final answer clearly."""
 
                         # 🔴 修复: 使用正确的 AsyncLLM 接口
                         # AsyncLLM 的方法是 __call__(prompt) 而不是 agenerate(messages=[...])
-                        response = await self.llm(prompt)
+                        response = await self.model(prompt)
 
                         if response:
-                            usage = self.llm.get_usage_summary()
+                            usage = self.model.get_usage_summary()
                             if isinstance(usage, dict) and "total_cost" in usage:
                                 cost = usage["total_cost"]
                             else:
@@ -1143,11 +1143,11 @@ Provide the final answer clearly."""
                         print(f"  ⚠️  Fallback直接调用LLM失败: {e}")
 
                 # 策略2: 如果LLM调用也失败，使用Custom operator但不依赖Test
-                # 🔴 修复: 只在 self.llm 不是 None 时才尝试
-                if self.llm is not None:
+                # 🔴 修复: 只在 self.model 不是 None 时才尝试
+                if self.model is not None:
                     try:
                         print(f"  📝 Fallback: 尝试使用Custom operator")
-                        custom = operator_module.Custom(self.llm)
+                        custom = operator_module.Custom(self.model)
                         result = await custom(
                             input=problem,
                             instruction="Generate a solution without requiring test validation."
@@ -1157,7 +1157,7 @@ Provide the final answer clearly."""
                             # L1.3: 使用安全提取方法获取响应
                             response_text = self._safe_extract_response(result)
                             if response_text:
-                                usage = self.llm.get_usage_summary()
+                                usage = self.model.get_usage_summary()
                                 if isinstance(usage, dict) and "total_cost" in usage:
                                     cost = usage["total_cost"]
                                 else:
@@ -1198,12 +1198,12 @@ class Workflow:
     def __init__(self, name: str, llm_config, dataset: DatasetType):
         self.name = name
         self.dataset = dataset
-        self.llm = create_llm_instance(llm_config)
-        self.custom = operator.Custom(self.llm)
+        self.model = create_llm_instance(llm_config)
+        self.custom = operator.Custom(self.model)
 
     async def __call__(self, problem: str):
         solution = await self.custom(input=problem, instruction="Solve this problem step by step and provide the final answer.")
-        return solution['response'], self.llm.get_usage_summary()["total_cost"]
+        return solution['response'], self.model.get_usage_summary()["total_cost"]
 """
 
     # 测试问题

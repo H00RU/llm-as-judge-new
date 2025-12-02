@@ -51,7 +51,8 @@ class RewardComputer:
         # 初始化答案提取器
         self.use_answer_extractor = use_answer_extractor
         if use_answer_extractor:
-            self.extractor = AnswerExtractor(use_llm_fallback=False)  # 暂时不使用LLM兜底
+            # 禁用LLM fallback以避免额外成本（规则提取已足够准确）
+            self.extractor = AnswerExtractor(use_llm_fallback=False)
         else:
             self.extractor = None
 
@@ -115,7 +116,7 @@ class RewardComputer:
             self.use_llm_judge = False
             self.llm_judge_client = None
 
-    def _llm_judge_compare(
+    def llm_judge_compare(
         self,
         problem: str,
         prediction: str,
@@ -304,18 +305,23 @@ Be LENIENT with formatting differences but STRICT with factual/numerical differe
         execution_metadata: Optional[Dict] = None  # 新增：执行元数据（包括生成质量）
     ) -> Dict:
         """
-        改进的奖励计算 - 区分生成质量和答案质量
+        统一的奖励计算框架 - 整合所有约束和评估
+
+        **统一归一化**: 所有奖励归一化到[-1.0, 1.0]范围
 
         Args:
             execution_metadata: 包含以下信息：
+                - operator_problem_type_mismatch: Operator-问题类型不匹配
+                - validation_failed: 验证失败
+                - error_type: 执行错误类型
+                - success: 是否执行成功
                 - had_signature_error: 是否有签名错误
                 - auto_fixes_applied: 自动修复列表
-                - validation_failed: 验证是否失败
                 - needed_fallback: 是否需要 Fallback
 
         Returns:
             {
-                'total': float,           # 总奖励
+                'total': float,           # 总奖励 (归一化到[-1.0, 1.0])
                 'answer_quality': float,  # 答案质量奖励
                 'generation_quality': float,  # 生成质量奖励
                 'breakdown': dict  # 详细分解
@@ -324,73 +330,130 @@ Be LENIENT with formatting differences but STRICT with factual/numerical differe
         metadata = metadata or {}
         execution_metadata = execution_metadata or {}
 
-        # ========== 部分 1: 答案质量奖励 ==========
-        # 使用LLM Judge进行语义比较（所有任务类型）
-        is_correct = self._llm_judge_compare(
+        # ========== 统一奖励框架 ==========
+        # 优先级1: 约束违规（最高优先级）
+        # 优先级2: 执行失败
+        # 优先级3: 执行成功 → 评估答案质量和代码质量
+
+        # === 情况1: Operator-问题类型不匹配 ===
+        if execution_metadata.get('operator_problem_type_mismatch', False):
+            reward = -0.6  # 归一化到[-1, 1]范围
+            return {
+                'total': reward,
+                'answer_quality': reward,
+                'generation_quality': 0.0,
+                'breakdown': {
+                    'reason': 'operator_problem_type_mismatch',
+                    'mismatch_type': execution_metadata.get('mismatch_type', 'Unknown'),
+                    'penalty': -0.6
+                }
+            }
+
+        # === 情况2: 验证失败（语法/格式错误） ===
+        if execution_metadata.get('validation_failed', False):
+            reward = -0.4  # 比mismatch轻
+            return {
+                'total': reward,
+                'answer_quality': reward,
+                'generation_quality': 0.0,
+                'breakdown': {
+                    'reason': 'validation_failed',
+                    'validation_error': execution_metadata.get('validation_error', 'Unknown'),
+                    'penalty': -0.4
+                }
+            }
+
+        # === 情况3: 执行失败 ===
+        if not execution_metadata.get('success', True):
+            error_type = execution_metadata.get('error_type', 'unknown')
+
+            if error_type == 'empty_answer':
+                reward = -0.8  # 执行完成但无输出
+            elif error_type == 'code_leakage':
+                reward = -0.7  # 返回类型错误
+            else:
+                reward = -1.0  # 完全失败
+
+            return {
+                'total': reward,
+                'answer_quality': reward,
+                'generation_quality': 0.0,
+                'breakdown': {
+                    'reason': 'execution_failed',
+                    'error_type': error_type,
+                    'penalty': reward
+                }
+            }
+
+        # === 情况4: 执行成功 → 评估答案质量 + 生成质量 ===
+        # 4.1 答案质量评估（使用LLM Judge）
+        is_correct = self.llm_judge_compare(
             problem=problem,
             prediction=str(prediction),
             ground_truth=str(ground_truth),
             problem_type=problem_type
         )
 
-        # 答案质量：正确=10分，错误=-5分
-        answer_quality_score = 10.0 if is_correct else -5.0
+        # 答案质量：正确=+1.0, 错误=-0.5（归一化）
+        answer_quality_score = 1.0 if is_correct else -0.5
 
-        # ========== 部分 2: 生成代码质量奖励（温和纠正版）==========
-        # 设计理念：鼓励探索 + 温和纠正，而非严厉惩罚
-        # 语法错误会降低总奖励，但不会完全抵消正确答案的价值
+        # 4.2 生成质量评估（代码质量）
         generation_quality_score = 0.0
 
-        # 2a. 检查是否有签名错误（最关键）
+        # 检查签名错误
         if execution_metadata.get('had_signature_error', False):
-            generation_quality_score -= 3.0  # 温和惩罚：-3.0（原-5.0过重）
+            generation_quality_score -= 0.3
         else:
-            generation_quality_score += 1.5  # 提高正确奖励
+            generation_quality_score += 0.15
 
-        # 2b. 检查拼写错误（新增）- ll_m, lll, ll_config等
+        # 检查拼写错误
         if execution_metadata.get('had_typo_errors', False):
-            generation_quality_score -= 2.5  # 温和惩罚：-2.5（原-4.0过重）
+            generation_quality_score -= 0.25
 
-        # 2c. 检查是否有未初始化变量
+        # 检查未初始化变量
         if execution_metadata.get('had_uninitialized_vars', False):
-            generation_quality_score -= 2.0  # 温和惩罚：-2.0（原-3.0过重）
+            generation_quality_score -= 0.2
 
-        # 2d. 检查是否需要 Fallback
+        # 检查是否需要Fallback
         if execution_metadata.get('needed_fallback', False):
-            generation_quality_score -= 1.5  # 适度惩罚
+            generation_quality_score -= 0.15
         else:
-            generation_quality_score += 1.5  # 提高成功奖励
+            generation_quality_score += 0.15
 
-        # 2e. 检查验证是否失败
+        # 检查验证失败
         if execution_metadata.get('validation_failed', False):
-            generation_quality_score -= 1.0  # 轻度惩罚
+            generation_quality_score -= 0.1
 
-        # 2f. 检查是否有未初始化的operators
+        # 检查未初始化operators
         if execution_metadata.get('had_uninitialized_operators', False):
-            generation_quality_score -= 1.0  # 轻度惩罚
+            generation_quality_score -= 0.1
         else:
             if 'had_uninitialized_operators' in execution_metadata:
-                generation_quality_score += 0.5  # 小奖励
+                generation_quality_score += 0.05
 
-        # ========== 部分 3: 总奖励 ==========
+        # 限制generation_quality_score范围到[-0.5, 0.3]
+        generation_quality_score = max(-0.5, min(0.3, generation_quality_score))
+
+        # 4.3 总奖励（归一化）
         total_score = answer_quality_score + generation_quality_score
+        # 确保总奖励在[-1.0, 1.0]范围内
+        total_score = max(-1.0, min(1.0, total_score))
 
         # ========== 打印详细的奖励分解 ==========
         print(f"""
 ┌─────────────────────────────────────────┐
-│ 📊 GRPO 奖励计算 (温和纠正版)            │
+│ 📊 统一奖励框架 (归一化到[-1.0, 1.0])    │
 ├─────────────────────────────────────────┤
-│ 答案质量奖励:     {answer_quality_score:+6.1f}  {'✅ 正确' if is_correct else '❌ 错误'}
-│ 生成质量奖励:     {generation_quality_score:+6.1f}
-│   ├─ 签名: {'✅ 正确 +1.5' if not execution_metadata.get('had_signature_error') else '❌ 错误 -3.0'}
-│   ├─ 拼写: {'✅ 无误' if not execution_metadata.get('had_typo_errors') else '❌ 错误 -2.5'}
-│   ├─ 未初始化变量: {'✅ 正确' if not execution_metadata.get('had_uninitialized_vars') else '❌ 错误 -2.0'}
-│   ├─ 执行: {'✅ 直接 +1.5' if not execution_metadata.get('needed_fallback') else '❌ 需要Fallback -1.5'}
-│   ├─ 验证: {'✅ 通过' if not execution_metadata.get('validation_failed') else '❌ 失败 -1.0'}
-│   └─ 初始化: {'✅ 正确 +0.5' if not execution_metadata.get('had_uninitialized_operators') else '❌ 缺失 -1.0'}
+│ 答案质量:     {answer_quality_score:+6.2f}  {'✅ 正确' if is_correct else '❌ 错误'}
+│ 生成质量:     {generation_quality_score:+6.2f}
+│   ├─ 签名: {'✅ +0.15' if not execution_metadata.get('had_signature_error') else '❌ -0.30'}
+│   ├─ 拼写: {'✅ 无误' if not execution_metadata.get('had_typo_errors') else '❌ -0.25'}
+│   ├─ 初始化: {'✅ 正确' if not execution_metadata.get('had_uninitialized_vars') else '❌ -0.20'}
+│   ├─ 执行: {'✅ +0.15' if not execution_metadata.get('needed_fallback') else '❌ -0.15'}
+│   └─ 算子: {'✅ +0.05' if not execution_metadata.get('had_uninitialized_operators') else '❌ -0.10'}
 ├─────────────────────────────────────────┤
-│ 总奖励:          {total_score:+6.1f}
-│ 💡 策略: Few-shot教学 + 温和纠正
+│ 总奖励:       {total_score:+6.2f}
+│ 范围: [-1.0 完全失败, +1.0 完美]
 └─────────────────────────────────────────┘
 """)
 
@@ -402,14 +465,10 @@ Be LENIENT with formatting differences but STRICT with factual/numerical differe
             metadata['used_llm_judge'] = True
             metadata['has_signature_error'] = execution_metadata.get('had_signature_error', False)
 
-        # 归一化到 [-1, 1] 或 [0, 1] 用于 GRPO
-        # 这里使用线性映射，保持分数的相对关系
-        normalized_reward = total_score / 20.0  # 范围 [-0.5, 1.0]（因为最低是 -10, 最高是 +20）
-
         return {
-            'total': normalized_reward,
-            'answer_quality': answer_quality_score / 10.0,
-            'generation_quality': generation_quality_score / 4.0,  # 最多 +2.0，所以归一化为 /4
+            'total': total_score,  # 已归一化到[-1.0, 1.0]
+            'answer_quality': answer_quality_score,
+            'generation_quality': generation_quality_score,
             'breakdown': {
                 'answer_quality_score': answer_quality_score,
                 'generation_quality_score': generation_quality_score,
@@ -477,7 +536,8 @@ Be LENIENT with formatting differences but STRICT with factual/numerical differe
                 # 使用相对误差比较（处理浮点精度）
                 rel_error = abs(pred_num - gt_num) / (abs(gt_num) + 1e-9)
                 return rel_error < 1e-6
-            except:
+            except (ValueError, ZeroDivisionError, TypeError) as e:
+                # 数字解析失败，尝试其他方法
                 pass
 
             # 方法1: boxed 格式
@@ -490,7 +550,8 @@ Be LENIENT with formatting differences but STRICT with factual/numerical differe
                     rel_error = abs(pred_num - gt_num) / (abs(gt_num) + 1e-9)
                     if rel_error < 1e-6:
                         return True
-                except:
+                except (ValueError, ZeroDivisionError, TypeError) as e:
+                    # boxed格式解析失败，尝试其他方法
                     pass
 
             # 方法2: 数字提取
@@ -630,7 +691,8 @@ Be LENIENT with formatting differences but STRICT with factual/numerical differe
                         return 2.0    # 数量级正确(新增阶梯)
                     else:
                         return -5.0   # 错误
-                except:
+                except (ValueError, ZeroDivisionError, TypeError) as e:
+                    # 数字解析失败，尝试其他方法
                     pass
 
             # 方法2: 数字提取(改进版)
@@ -689,7 +751,8 @@ Be LENIENT with formatting differences but STRICT with factual/numerical differe
             if m:
                 try:
                     numbers.append(float(m))
-                except:
+                except (ValueError, TypeError) as e:
+                    # Float转换失败，跳过此匹配
                     pass
 
         # Method 2: Word-to-number recognition (NEW - fixes ~15-20% QA errors)
@@ -812,151 +875,6 @@ Be LENIENT with formatting differences but STRICT with factual/numerical differe
     def _compute_general_correctness(self, prediction: str, ground_truth: str) -> float:
         """通用正确性评估"""
         return self._compute_qa_correctness(prediction, ground_truth)
-
-    def _compute_efficiency_reward(self, cost: float) -> float:
-        """
-        计算效率奖励(基于API成本) - ROLL风格
-
-        Returns:
-            reward: [-8, 10]
-        """
-        if cost == 0.0:
-            return 0.0
-
-        # ROLL风格的成本阈值
-        if cost <= 0.001:
-            return 10.0
-        elif cost <= 0.005:
-            return 5.0
-        elif cost <= 0.01:
-            return 0.0
-        elif cost <= 0.05:
-            return -3.0
-        else:
-            return -8.0
-
-    def _compute_simplicity_reward(
-        self,
-        execution_time: float,
-        num_operators: int = 1
-    ) -> float:
-        """
-        计算简洁性奖励 - ROLL风格
-
-        Returns:
-            reward: [-5, 10]
-        """
-        # 基于执行时间
-        if execution_time <= 5.0:
-            time_reward = 10.0
-        elif execution_time <= 15.0:
-            time_reward = 5.0
-        elif execution_time <= 30.0:
-            time_reward = 0.0
-        elif execution_time <= 60.0:
-            time_reward = -3.0
-        else:
-            time_reward = -5.0
-
-        # 基于算子数量
-        if num_operators <= 2:
-            operator_reward = 10.0
-        elif num_operators <= 4:
-            operator_reward = 5.0
-        elif num_operators <= 6:
-            operator_reward = 0.0
-        else:
-            operator_reward = -5.0
-
-        # 平均
-        return (time_reward + operator_reward) / 2.0
-
-    def _compute_format_reward(self, response: str, problem_type: str) -> float:
-        """
-        格式奖励(新增 - ROLL风格)
-
-        检查响应格式规范性
-
-        Returns:
-            reward: [-2, 2]
-        """
-        if not response:
-            return -2.0
-
-        if problem_type == "math":
-            # 检查是否有思考过程+答案
-            has_think = bool(re.search(r'<think>.*?</think>', response, re.DOTALL))
-            has_answer = bool(re.search(r'<answer>.*?</answer>', response, re.DOTALL))
-
-            if has_think and has_answer:
-                return 2.0    # 完美格式
-            elif has_answer:
-                return 0.0    # 基本格式
-            else:
-                return -2.0   # 格式混乱
-
-        elif problem_type == "code":
-            # 检查是否有代码块
-            has_code_block = bool(re.search(r'```.*?```', response, re.DOTALL))
-
-            if has_code_block:
-                return 2.0
-            else:
-                return -2.0
-
-        elif problem_type == "qa":
-            # 检查答案长度合理性
-            if 10 < len(response) < 500:
-                return 2.0
-            elif len(response) > 0:
-                return 0.0
-            else:
-                return -2.0
-
-        return 0.0
-
-    def _compute_repetition_penalty(self, response: str, ngram_size: int = 3) -> float:
-        """
-        重复惩罚(新增 - ROLL风格)
-
-        计算N-gram重复度并给予惩罚
-
-        Args:
-            response: 响应文本
-            ngram_size: N-gram大小(默认3)
-
-        Returns:
-            penalty: [-2, 0]
-        """
-        if not response:
-            return 0.0
-
-        words = response.split()
-
-        if len(words) < ngram_size:
-            return 0.0
-
-        # 生成所有N-grams
-        ngrams = []
-        for i in range(len(words) - ngram_size + 1):
-            ngram = tuple(words[i:i+ngram_size])
-            ngrams.append(ngram)
-
-        if not ngrams:
-            return 0.0
-
-        # 计算唯一N-grams比例
-        unique_ratio = len(set(ngrams)) / len(ngrams)
-
-        # 转换为惩罚
-        if unique_ratio > 0.9:
-            return 0.0      # 几乎无重复
-        elif unique_ratio > 0.7:
-            return -0.5     # 轻微重复
-        elif unique_ratio > 0.5:
-            return -1.0     # 中度重复
-        else:
-            return -2.0     # 严重重复
 
 
 def test_reward_computer():

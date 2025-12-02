@@ -1,109 +1,125 @@
 #!/usr/bin/env python3
 """
 评估脚本 - 在6个数据集上分别测试微调后的模型
+
+✅ 修复后的评估流程（与训练流程一致）：
+问题 → Qwen生成workflow代码 → AFlow执行workflow → gpt-4o-mini运行算子 → 答案 → 准确性评估
+      (RL策略模型)           (工作流引擎)       (执行引擎)      (精确匹配/LLM Judge)
+
+❌ 旧版本错误流程（已废弃）：
+问题 → Qwen直接生成答案 → 简单字符串匹配 → "准确率"
 """
 
 import os
 import sys
 import json
 import argparse
+import asyncio
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 import numpy as np
 from tqdm import tqdm
+import yaml
 
 sys.path.insert(0, 'src')
 
+from rl_workflow_generator import RLWorkflowGenerator
+from aflow_executor import AFlowExecutor
+from reward_computer import RewardComputer
+
 class ModelEvaluator:
-    """模型评估器"""
+    """模型评估器 - 使用与训练一致的workflow生成→执行流程"""
 
     def __init__(self,
-                 model_name: str = "qwen25-7b",
-                 checkpoint_path: str = None,
+                 config_path: str = "config/training.yaml",
+                 checkpoint_path: Optional[str] = None,
                  device: str = "cuda:0"):
         """
         Args:
-            model_name: 模型名称 (qwen25-7b 或 qwen3-8b)
+            config_path: 训练配置文件路径
             checkpoint_path: LoRA权重路径，如果None则使用base model
             device: 使用的设备
         """
-        self.model_name = model_name
         self.checkpoint_path = checkpoint_path
         self.device = device
 
-        # 模型配置
-        self.model_configs = {
-            "qwen25-7b": {
-                "base_model": "Qwen/Qwen2.5-7B-Instruct",
-                "local_path": "./models/Qwen2.5-7B-Instruct"
-            },
-            "qwen3-8b": {
-                "base_model": "Qwen/Qwen-3-8B",
-                "local_path": "./models/Qwen-3-8B"
-            }
-        }
+        # 加载配置
+        with open(config_path, 'r') as f:
+            self.config = yaml.safe_load(f)
 
-        self.model = None
-        self.tokenizer = None
-        self._load_model()
-
-    def _load_model(self):
-        """加载模型和tokenizer"""
-        if self.model_name not in self.model_configs:
-            raise ValueError(f"Unknown model: {self.model_name}")
-
-        config = self.model_configs[self.model_name]
-        model_id = config["base_model"]
-
-        print(f"\n📦 加载模型: {self.model_name}")
-
-        # 优先使用本地模型
-        if Path(config["local_path"]).exists():
-            print(f"  使用本地模型: {config['local_path']}")
-            model_id = config["local_path"]
-
-        # 加载base model
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            torch_dtype=torch.bfloat16,
-            device_map=self.device,
-            trust_remote_code=True
+        # 初始化workflow生成器
+        print(f"\n📦 初始化评估器...")
+        self.workflow_generator = RLWorkflowGenerator(
+            model_name_or_path=checkpoint_path if checkpoint_path else self.config['base_model'],
+            config=self.config,
+            device=device
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        print("  ✅ Workflow生成器加载完成")
 
-        # 如果有checkpoint，加载LoRA权重
-        if self.checkpoint_path and Path(self.checkpoint_path).exists():
-            print(f"  加载LoRA权重: {self.checkpoint_path}")
-            self.model = PeftModel.from_pretrained(self.model, self.checkpoint_path)
-            self.model = self.model.merge_and_unload()
-        else:
-            print(f"  使用base model（未微调）")
+        # 初始化AFlow执行器
+        self.executor = AFlowExecutor(
+            aflow_config_path=self.config['aflow_config_path'],
+            operator_descriptions_path=self.config['aflow_operator_descriptions_path']
+        )
+        print("  ✅ AFlow执行器初始化完成")
 
-        self.model.eval()
-        print("  ✅ 模型加载完成")
+        # 初始化奖励计算器（用于评估答案正确性）
+        self.reward_computer = RewardComputer(
+            config=self.config,
+            aflow_config_path=self.config['aflow_config_path']
+        )
+        print("  ✅ 奖励计算器初始化完成")
 
-    def generate(self, prompt: str, max_tokens: int = 512) -> str:
-        """生成回应"""
-        inputs = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
+    async def generate_and_execute_workflow(self,
+                                            problem: str,
+                                            problem_type: str,
+                                            entry_point: str = '',
+                                            test: str = '') -> Dict[str, Any]:
+        """
+        生成workflow并执行（与训练流程一致）
 
-        with torch.no_grad():
-            outputs = self.model.generate(
-                inputs,
-                max_new_tokens=max_tokens,
-                temperature=0.3,
-                top_p=0.95,
-                do_sample=False,
-                pad_token_id=self.tokenizer.eos_token_id
+        Returns:
+            Dict包含:
+            - answer: 最终答案
+            - workflow_code: 生成的workflow代码
+            - success: 是否执行成功
+            - metadata: 执行元数据
+        """
+        # 1. 生成workflow代码
+        workflow_code = self.workflow_generator.generate_workflow(
+            problem=problem,
+            problem_type=problem_type
+        )
+
+        # 2. 执行workflow
+        try:
+            answer, cost, metadata = await self.executor.execute_workflow(
+                workflow_code=workflow_code,
+                problem=problem,
+                problem_type=problem_type,
+                entry_point=entry_point,
+                test=test
             )
 
-        response = self.tokenizer.decode(outputs[0][inputs.shape[1]:], skip_special_tokens=True)
-        return response.strip()
+            return {
+                'answer': answer,
+                'workflow_code': workflow_code,
+                'success': metadata.get('success', False),
+                'metadata': metadata
+            }
+        except Exception as e:
+            return {
+                'answer': None,
+                'workflow_code': workflow_code,
+                'success': False,
+                'metadata': {'error': str(e), 'success': False}
+            }
 
-    def evaluate_dataset(self, dataset_name: str, test_file: str) -> Dict[str, Any]:
+    async def evaluate_dataset(self, dataset_name: str, test_file: str) -> Dict[str, Any]:
         """评估单个数据集"""
         print(f"\n🧪 评估 {dataset_name}...")
 
@@ -111,25 +127,26 @@ class ModelEvaluator:
             print(f"  ❌ 文件不存在: {test_file}")
             return {}
 
+        # 映射数据集到问题类型
+        dataset_to_type = {
+            "gsm8k": "math",
+            "math": "math",
+            "squad2": "qa",
+            "hotpotqa": "qa",
+            "humaneval": "code",
+            "mbpp": "code"
+        }
+        problem_type = dataset_to_type.get(dataset_name, "qa")
+
         results = {
             "dataset": dataset_name,
+            "problem_type": problem_type,
             "total": 0,
             "correct": 0,
+            "execution_success": 0,
             "predictions": [],
             "metrics": {}
         }
-
-        # 根据数据集类型确定评估指标
-        metrics_config = {
-            "gsm8k": ["accuracy"],
-            "math": ["accuracy"],
-            "squad2": ["exact_match", "f1"],
-            "hotpotqa": ["exact_match", "f1"],
-            "humaneval": ["pass@1"],
-            "mbpp": ["pass@1"]
-        }
-
-        results["metrics_to_compute"] = metrics_config.get(dataset_name, ["accuracy"])
 
         # 加载测试数据
         test_samples = []
@@ -145,86 +162,123 @@ class ModelEvaluator:
         results["total"] = len(test_samples)
         print(f"  总样本数: {results['total']}")
 
-        # 逐个评估
+        # 逐个评估（限制前100个用于快速评估）
         correct_count = 0
+        success_count = 0
 
-        for idx, sample in enumerate(tqdm(test_samples[:100], desc=f"Evaluating {dataset_name}")):  # 快速评估，只用前100个
+        for idx, sample in enumerate(tqdm(test_samples[:100], desc=f"Evaluating {dataset_name}")):
             question = sample.get("question", "")
             reference_answer = sample.get("reference_answer", "")
+            entry_point = sample.get('entry_point', '')
+            test = sample.get('test', '')
 
             if not question:
                 continue
 
-            # 生成回应
+            # 生成workflow并执行
             try:
-                prediction = self.generate(question, max_tokens=512)
+                result = await self.generate_and_execute_workflow(
+                    problem=question,
+                    problem_type=problem_type,
+                    entry_point=entry_point,
+                    test=test
+                )
+
+                answer = result['answer']
+                success = result['success']
+                metadata = result['metadata']
+
+                if success:
+                    success_count += 1
+
+                # 使用reward_computer评估正确性
+                is_correct = self._evaluate_correctness(
+                    prediction=answer,
+                    reference=reference_answer,
+                    problem_type=problem_type,
+                    metadata=metadata,
+                    problem=question
+                )
+
+                if is_correct:
+                    correct_count += 1
+
+                results["predictions"].append({
+                    "question": question[:100],
+                    "reference": str(reference_answer)[:100],
+                    "prediction": str(answer)[:100],
+                    "correct": is_correct,
+                    "execution_success": success
+                })
+
             except Exception as e:
-                print(f"  生成失败: {e}")
-                prediction = ""
-
-            # 简单的准确性评估（基于是否包含答案的关键词）
-            is_correct = self._check_correctness(dataset_name, prediction, reference_answer)
-
-            if is_correct:
-                correct_count += 1
-
-            results["predictions"].append({
-                "question": question[:100],
-                "reference": reference_answer[:100],
-                "prediction": prediction[:100],
-                "correct": is_correct
-            })
+                print(f"  评估失败: {e}")
+                results["predictions"].append({
+                    "question": question[:100],
+                    "reference": str(reference_answer)[:100],
+                    "prediction": "ERROR",
+                    "correct": False,
+                    "execution_success": False,
+                    "error": str(e)
+                })
 
         # 计算指标
-        accuracy = correct_count / min(100, results["total"]) if results["total"] > 0 else 0
-        results["metrics"]["accuracy"] = accuracy
-        results["correct"] = correct_count
+        sample_count = min(100, results["total"])
+        accuracy = correct_count / sample_count if sample_count > 0 else 0
+        execution_rate = success_count / sample_count if sample_count > 0 else 0
 
-        print(f"  ✅ 准确率: {accuracy:.2%}")
+        results["metrics"]["accuracy"] = accuracy
+        results["metrics"]["execution_success_rate"] = execution_rate
+        results["correct"] = correct_count
+        results["execution_success"] = success_count
+
+        print(f"  ✅ 准确率: {accuracy:.2%} | 执行成功率: {execution_rate:.2%}")
 
         return results
 
-    def _check_correctness(self, dataset_name: str, prediction: str, reference: str) -> bool:
-        """检查预测是否正确（简单启发式方法）"""
-        prediction = prediction.lower().strip()
-        reference = reference.lower().strip()
+    def _evaluate_correctness(self,
+                              prediction: Any,
+                              reference: str,
+                              problem_type: str,
+                              metadata: Dict,
+                              problem: str = '') -> bool:
+        """
+        评估答案正确性 - 使用与训练一致的LLM Judge评估
 
-        if dataset_name in ["humaneval", "mbpp"]:
-            # 代码任务：检查是否包含完整的函数定义或return语句
-            return "def " in prediction or "return" in prediction
-
-        elif dataset_name in ["squad2", "hotpotqa"]:
-            # QA任务：简单的词汇重叠
-            pred_words = set(prediction.split())
-            ref_words = set(reference.split())
-            overlap = len(pred_words & ref_words)
-            return overlap >= min(3, len(ref_words))
-
-        else:  # math datasets
-            # 数学任务：检查数字答案
-            import re
-            pred_nums = re.findall(r'-?\d+\.?\d*', prediction)
-            ref_nums = re.findall(r'-?\d+\.?\d*', reference)
-
-            if pred_nums and ref_nums:
-                try:
-                    return float(pred_nums[-1]) == float(ref_nums[-1])
-                except ValueError:
-                    return pred_nums[-1] == ref_nums[-1]
-
+        Returns:
+            bool: 是否正确
+        """
+        # 如果执行失败，直接返回False
+        if not metadata.get('success', False):
             return False
 
-    def evaluate_all(self, test_dir: str = "data/test") -> Dict[str, Any]:
+        # 如果答案为None或空，返回False
+        if prediction is None or str(prediction).strip() == '':
+            return False
+
+        # 使用reward_computer的LLM Judge评估（公共接口）
+        try:
+            is_correct = self.reward_computer.llm_judge_compare(
+                problem=problem,
+                prediction=str(prediction),
+                ground_truth=str(reference),
+                problem_type=problem_type
+            )
+            return is_correct
+        except Exception as e:
+            print(f"    ⚠️ LLM Judge评估失败: {e}")
+            return False
+
+    async def evaluate_all(self, test_dir: str = "data/test") -> Dict[str, Any]:
         """评估所有6个数据集"""
         print("\n" + "=" * 60)
-        print(f"开始评估 {self.model_name} 模型")
+        print(f"开始评估模型（使用workflow生成→执行流程）")
         print("=" * 60)
 
         test_dir = Path(test_dir)
         datasets = ["gsm8k", "math", "squad2", "hotpotqa", "humaneval", "mbpp"]
 
         all_results = {
-            "model": self.model_name,
             "checkpoint": self.checkpoint_path,
             "datasets": {}
         }
@@ -232,28 +286,32 @@ class ModelEvaluator:
         for dataset_name in datasets:
             test_file = test_dir / f"{dataset_name}_test.jsonl"
             if test_file.exists():
-                result = self.evaluate_dataset(dataset_name, str(test_file))
+                result = await self.evaluate_dataset(dataset_name, str(test_file))
                 all_results["datasets"][dataset_name] = result
             else:
                 print(f"\n⚠️  {dataset_name} 测试文件不存在")
 
         # 计算总体指标
         accuracies = []
+        execution_rates = []
         for result in all_results["datasets"].values():
             if "accuracy" in result.get("metrics", {}):
                 accuracies.append(result["metrics"]["accuracy"])
+            if "execution_success_rate" in result.get("metrics", {}):
+                execution_rates.append(result["metrics"]["execution_success_rate"])
 
         if accuracies:
             all_results["overall_accuracy"] = np.mean(accuracies)
+        if execution_rates:
+            all_results["overall_execution_success_rate"] = np.mean(execution_rates)
 
         return all_results
 
 
 def main():
     parser = argparse.ArgumentParser(description="评估微调后的模型")
-    parser.add_argument("--model", default="qwen25-7b",
-                       choices=["qwen25-7b", "qwen3-8b"],
-                       help="模型名称")
+    parser.add_argument("--config", default="config/training.yaml",
+                       help="训练配置文件路径")
     parser.add_argument("--checkpoint", default=None,
                        help="LoRA权重路径，如 checkpoints/qwen25-7b/grpo_mixed/step_1000")
     parser.add_argument("--test_dir", default="data/test",
@@ -271,16 +329,18 @@ def main():
 
     # 初始化评估器
     evaluator = ModelEvaluator(
-        model_name=args.model,
+        config_path=args.config,
         checkpoint_path=args.checkpoint,
         device=args.device
     )
 
-    # 评估所有数据集
-    results = evaluator.evaluate_all(test_dir=args.test_dir)
+    # 评估所有数据集（使用async）
+    print("\n🚀 开始评估（workflow生成→AFlow执行流程）...")
+    results = asyncio.run(evaluator.evaluate_all(test_dir=args.test_dir))
 
     # 保存结果
-    output_file = output_dir / f"{args.model}_results.json"
+    checkpoint_name = Path(args.checkpoint).name if args.checkpoint else "base_model"
+    output_file = output_dir / f"{checkpoint_name}_results.json"
     with open(output_file, "w") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
 
@@ -303,6 +363,8 @@ def main():
 
     if "overall_accuracy" in results:
         print(f"\n总体准确率: {results['overall_accuracy']:.4f}")
+    if "overall_execution_success_rate" in results:
+        print(f"总体执行成功率: {results['overall_execution_success_rate']:.4f}")
 
 if __name__ == "__main__":
     main()

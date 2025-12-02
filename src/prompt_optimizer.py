@@ -54,12 +54,12 @@ class PromptOptimizer:
         # entry_point: The function name to test (HumanEval format)
         # test: The test code containing check() function (HumanEval format)
         # MUST return (solution, cost) tuple
-        # Example: return code, self.llm.get_usage_summary()["total_cost"]"""
+        # Example: return code, self.model.get_usage_summary()["total_cost"]"""
         else:
             call_signature = "async def __call__(self, problem: str):"
             call_comment = """# Solve: {problem}
         # MUST return (solution, cost) tuple
-        # Safe access: return solution.get('response', ''), self.llm.get_usage_summary().get("total_cost", 0.0)"""
+        # Safe access: return solution.get('response', ''), self.model.get_usage_summary().get("total_cost", 0.0)"""
 
         # 3. 组合提示词
         prompt = f"""Generate a Python Workflow class. Follow the exact template and API signatures.
@@ -67,11 +67,11 @@ class PromptOptimizer:
 🚨 CRITICAL RULES FOR OPERATOR INITIALIZATION AND CALLS:
 
 1️⃣ OPERATOR CLASS NAMES (PascalCase - VERY IMPORTANT):
-   ✅ CORRECT: self.custom = operator.Custom(self.llm)
-   ✅ CORRECT: self.answer_generate = operator.AnswerGenerate(self.llm)
-   ✅ CORRECT: self.test = operator.Test(self.llm)
-   ❌ WRONG: self.custom = operator.custom(self.llm)
-   ❌ WRONG: self.answer_generate = operator.answer_generate(self.llm)
+   ✅ CORRECT: self.custom = operator.Custom(self.model)
+   ✅ CORRECT: self.answer_generate = operator.AnswerGenerate(self.model)
+   ✅ CORRECT: self.test = operator.Test(self.model)
+   ❌ WRONG: self.custom = operator.custom(self.model)
+   ❌ WRONG: self.answer_generate = operator.answer_generate(self.model)
 
 ⚡ PERFORMANCE CRITICAL - AVOID REDUNDANT CALLS:
    ✅ CORRECT: Cache operator results and reuse them
@@ -93,10 +93,10 @@ class PromptOptimizer:
 3️⃣ Example INCORRECT calls (WILL FAIL):
    ❌ await self.test(problem=problem)  # Missing solution and entry_point!
    ❌ await self.review(solution=code)  # Missing problem!
-   ❌ self.custom = operator.custom(self.llm)  # Wrong case!
+   ❌ self.custom = operator.custom(self.model)  # Wrong case!
 
 4️⃣ Example CORRECT calls (WILL WORK):
-   ✅ self.custom = operator.Custom(self.llm)  # Correct case!
+   ✅ self.custom = operator.Custom(self.model)  # Correct case!
    ✅ await self.test(problem=problem, solution=solution, entry_point=entry_point)
    ✅ await self.review(problem=problem, solution=code)
 
@@ -133,15 +133,15 @@ class Workflow:
     def __init__(self, name: str, llm_config, dataset: DatasetType):
         self.name = name
         self.dataset = dataset
-        self.llm = create_llm_instance(llm_config)
+        self.model = create_llm_instance(llm_config)
         # Initialize operators you need, e.g.:
-        # self.custom = operator.Custom(self.llm)
-        # self.answer_generate = operator.AnswerGenerate(self.llm)
-        # self.programmer = operator.Programmer(self.llm)
-        # self.sc_ensemble = operator.ScEnsemble(self.llm)
-        # self.test = operator.Test(self.llm)
-        # self.review = operator.Review(self.llm)
-        # self.revise = operator.Revise(self.llm)
+        # self.custom = operator.Custom(self.model)
+        # self.answer_generate = operator.AnswerGenerate(self.model)
+        # self.programmer = operator.Programmer(self.model)
+        # self.sc_ensemble = operator.ScEnsemble(self.model)
+        # self.test = operator.Test(self.model)
+        # self.review = operator.Review(self.model)
+        # self.revise = operator.Revise(self.model)
 
     {call_signature}
         {call_comment}
@@ -306,9 +306,9 @@ async def __call__(self, problem: str, entry_point: str, test: str):
         # Optional: Test revised code (remove if time is critical)
         # final_test = await self.test(problem=problem, solution=final_code, entry_point=entry_point)
 
-        return final_code, self.llm.get_usage_summary()["total_cost"]
+        return final_code, self.model.get_usage_summary()["total_cost"]
 
-    return code, self.llm.get_usage_summary()["total_cost"]
+    return code, self.model.get_usage_summary()["total_cost"]
 ```
 
 ✅ CODE Problem Requirements:

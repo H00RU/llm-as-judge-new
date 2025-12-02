@@ -39,7 +39,7 @@ temperature_schedule:
 
 # 生成配置（当temperature_schedule.enabled=false时使用）
 generation_config:
-  temperature: 0.4            # ✅ 固定为0.4（用户要求）
+  temperature: 0.2            # ✅ 调整到0.2（0.1过低会抑制RL探索，参考CRITICAL_REVIEW.md）
   max_tokens: 4096            # ✅ 增大防止截断（参考reference）
   top_p: 0.95
   top_k: 50

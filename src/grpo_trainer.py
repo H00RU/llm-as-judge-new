@@ -386,75 +386,68 @@ class GRPOTrainer:
                         test=sample.get('test', '')  # NEW: pass test cases for HumanEval
                     )
 
-                    # 方案B: 分级的约束处理 - 从硬block改为soft reward学习
+                    # ✅ 统一的奖励计算框架 - 所有情况都由reward_computer处理
+                    # reward_computer.compute_reward()现在内部处理：
+                    # - Operator-问题类型不匹配 → -0.6
+                    # - 验证失败 → -0.4
+                    # - 执行失败 → -1.0 到 -0.7（根据错误类型）
+                    # - 执行成功 → 答案质量 + 生成质量，归一化到[-1.0, 1.0]
 
-                    # 第一级：operator-problem type 匹配检查（最基础的约束违反）
+                    reward_result = self.reward_computer.compute_reward(
+                        problem=problem,
+                        prediction=answer,
+                        ground_truth=ground_truth,
+                        problem_type=problem_type,
+                        metadata=metadata,
+                        execution_metadata=metadata
+                    )
+
+                    # 提取总奖励和明细
+                    if isinstance(reward_result, dict):
+                        reward = reward_result['total']
+                        breakdown = reward_result.get('breakdown', {})
+                    else:
+                        # 向后兼容
+                        reward = reward_result
+                        breakdown = {}
+
+                    # 提取正确性分数用于追踪
+                    correctness = breakdown.get('answer_quality', reward)
+                    correctness_scores.append(correctness)
+                    group_correctness.append(correctness)
+
+                    # 根据奖励值判断状态并打印
                     if metadata.get('operator_problem_type_mismatch', False):
-                        reward = -5.0  # 基础约束违反惩罚
-                        correctness = -5.0
-                        correctness_scores.append(correctness)
-                        group_correctness.append(correctness)
-
                         mismatch_type = metadata.get('mismatch_type', 'Unknown')
-                        print(f"  ⚠️  Operator-problem type mismatch ({mismatch_type}) → 惩罚 {reward}")
-
+                        print(f"  ⚠️  Operator-problem type mismatch ({mismatch_type}) → 奖励 {reward:.2f}")
                         wandb.log({
                             f"sample/{problem_type}/operator_mismatch": 1,
                             f"sample/{problem_type}/reward": reward,
                             f"sample/step": step,
                         })
-
-                    # 第二级：验证失败（语法/格式错误）
                     elif metadata.get('validation_failed', False):
-                        reward = -3.0  # 验证失败惩罚（比执行失败轻）
-                        correctness = -3.0
-                        correctness_scores.append(correctness)
-                        group_correctness.append(correctness)
-
                         validation_error = metadata.get('validation_error', 'Unknown')
-                        print(f"  ⚠️  验证失败 ({validation_error[:30]}) → 惩罚 {reward}")
-
+                        print(f"  ⚠️  验证失败 ({validation_error[:30]}) → 奖励 {reward:.2f}")
                         wandb.log({
                             f"sample/{problem_type}/validation_failed": 1,
                             f"sample/{problem_type}/reward": reward,
                             f"sample/step": step,
                         })
-
-                    elif metadata['success']:
-                        # 工作流验证成功且执行成功
-                        # 改进的奖励计算：传入 execution_metadata 以考虑生成质量
-                        reward_result = self.reward_computer.compute_reward(
-                            problem=problem,
-                            prediction=answer,
-                            ground_truth=ground_truth,
-                            problem_type=problem_type,
-                            metadata=metadata,
-                            execution_metadata=metadata  # 传入执行元数据用于生成质量评估
-                        )
-
-                        # 提取总奖励和明细
-                        if isinstance(reward_result, dict):
-                            reward = reward_result['total']
-                            breakdown = reward_result.get('breakdown', {})
-                        else:
-                            # 向后兼容
-                            reward = reward_result
-                            breakdown = {}
-
-                        # ✨ 新增：显式计算并记录正确性
-                        correctness = self.reward_computer._compute_correctness_reward(
-                            prediction=answer,
-                            ground_truth=ground_truth,
-                            problem_type=problem_type
-                        )
-                        correctness_scores.append(correctness)
-                        group_correctness.append(correctness)
-
-                        # 判断是否正确（correctness > 5.0 表示接近正确或完全正确）
-                        is_correct = correctness >= 5.0
+                    elif not metadata.get('success', False):
+                        error_type = metadata.get('error_type', 'unknown')
+                        error_desc = metadata.get('error', 'unknown_error')[:30]
+                        print(f"  ❌ 执行失败 ({error_type}: {error_desc}) → 奖励 {reward:.2f} | 真值: {str(ground_truth)[:50]}")
+                        wandb.log({
+                            f"sample/{problem_type}/execution_failed": 1,
+                            f"sample/{problem_type}/error_type/{error_type}": 1,
+                            f"sample/{problem_type}/reward": reward,
+                            f"sample/step": step,
+                        })
+                    else:
+                        # 执行成功情况
+                        is_correct = correctness >= 0.5  # 归一化后，>0.5表示正确倾向
                         status_icon = "✅" if is_correct else "❌"
-
-                        # 实时日志到 wandb (样本级别)
+                        print(f"  {status_icon} 答案质量: {correctness:.2f} | 总奖励: {reward:.2f} | 预测: {str(answer)[:50]} | 真值: {str(ground_truth)[:50]}")
                         wandb.log({
                             f"sample/{problem_type}/correctness": correctness,
                             f"sample/{problem_type}/reward": reward,
@@ -462,47 +455,14 @@ class GRPOTrainer:
                             f"sample/sample_id": sample_idx * 4 + i,
                         })
 
-                        print(f"  {status_icon} 正确性评分: {correctness:.1f}/10.0 | 预测: {str(answer)[:50]} | 真值: {str(ground_truth)[:50]}")
-                    else:
-                        # 第三级：执行失败 - 根据错误类型分级惩罚（方案B）
-                        error_type = metadata.get('error_type', 'unknown')
-
-                        if error_type == 'empty_answer':
-                            # 答案为空 - 执行到底但无输出
-                            reward = -8.0
-                            correctness = -8.0
-                            error_desc = "empty_answer"
-                        elif error_type == 'code_leakage':
-                            # 代码泄露 - Programmer返回源代码而非执行结果
-                            reward = -7.0
-                            correctness = -7.0
-                            error_desc = "code_leakage"
-                        else:
-                            # 其他执行失败 - 最严重的错误
-                            reward = -10.0
-                            correctness = -10.0
-                            error_desc = metadata.get('error', 'unknown_error')[:30]
-
-                        correctness_scores.append(correctness)
-                        group_correctness.append(correctness)
-
-                        print(f"  ❌ 执行失败 ({error_desc}) → 惩罚 {reward} | 真值: {str(ground_truth)[:50]}")
-
-                        wandb.log({
-                            f"sample/{problem_type}/execution_failed": 1,
-                            f"sample/{problem_type}/error_type/{error_type}": 1,
-                            f"sample/{problem_type}/reward": reward,
-                            f"sample/step": step,
-                        })
-
                 except Exception as e:
                     print(f"  ⚠️  执行错误: {type(e).__name__}: {e}")
                     import traceback
                     traceback.print_exc()
                     answer = None
-                    reward = -10.0
-                    correctness_scores.append(-10.0)
-                    group_correctness.append(-10.0)
+                    reward = -1.0  # ✅ 统一归一化：异常也使用[-1.0, 1.0]范围
+                    correctness_scores.append(-1.0)
+                    group_correctness.append(-1.0)
 
                 group_workflows.append(workflow_code)
                 group_answers.append(answer)

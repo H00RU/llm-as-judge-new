@@ -11,13 +11,12 @@ class WorkflowCodeFixer:
     """自动修复workflow代码中的常见错误"""
 
     def __init__(self):
-        # 常见拼写错误映射
+        # 变量名修复：确保使用'model'而非'llm'
+        # 原因：tokenizer将'llm'分为['ll', 'm']两个token，导致生成错误
         self.typo_fixes = {
-            r'\bll_m\b': 'llm',
-            r'\blll\b': 'llm',
-            r'\bll_config\b': 'llm_config',
-            r'\bllm_confg\b': 'llm_config',
-            r'\bself\.revise\(': 'self.review(',  # revise operator不存在
+            r'\bself\.llm\b': 'self.model',           # self.llm → self.model
+            r'\boperator\.(\w+)\(self\.llm\)': r'operator.\1(self.model)',  # operator.X(self.llm) → operator.X(self.model)
+            r'\bself\.revise\(': 'self.review(',  # revise operator可能不存在
             r'await\s+self\.test\([^)]*test\s*=': 'await self.test(',  # 移除test参数
         }
 
@@ -137,7 +136,7 @@ class WorkflowCodeFixer:
                 if ',' not in return_content:
                     # 单一返回值，需要添加cost
                     indent = len(line) - len(line.lstrip())
-                    new_line = ' ' * indent + f'return {return_content}, self.llm.get_usage_summary()["total_cost"]'
+                    new_line = ' ' * indent + f'return {return_content}, self.model.get_usage_summary()["total_cost"]'
                     new_lines.append(new_line)
                     fixes.append("修复return语句 - 添加cost")
                     continue
@@ -174,14 +173,14 @@ class Workflow:
     def __init__(self, name: str, llm_config, dataset: DatasetType):
         self.name = name
         self.dataset = dataset
-        self.llm = create_llm_instance(llm_config)
-        self.answer_generate = operator.AnswerGenerate(self.llm)
+        self.model = create_llm_instance(llm_config)
+        self.answer_generate = operator.AnswerGenerate(self.model)
 
     async def __call__(self, problem: str, entry_point: str = None):
         # 安全的默认实现
         result = await self.answer_generate(input=problem)
         answer = result.get('answer', '') if isinstance(result, dict) else str(result)
-        cost = self.llm.get_usage_summary()["total_cost"]
+        cost = self.model.get_usage_summary()["total_cost"]
         return answer, cost
 '''
 
