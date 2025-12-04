@@ -232,12 +232,12 @@ assert "PascalCase" in prompt
 assert "Custom" in prompt
 ```
 
-2. **Enhanced code fixer**:
+2. **Enhanced code builder**:
 ```python
-from src.workflow_code_fixer import WorkflowCodeFixer
+from src.workflow_code_builder import WorkflowCodeBuilder
 
-fixer = WorkflowCodeFixer()
-fixed_code, fixes = fixer.fix_code(generated_code, problem_type="math")
+builder = WorkflowCodeBuilder()
+built_code, fixes = builder.build_workflow(generated_code, problem_type="math")
 
 print(f"Fixes applied: {len(fixes)}")
 for fix in fixes:
@@ -268,9 +268,9 @@ TypeError: Custom.__call__() missing 1 required positional argument: 'instructio
 assert operator_templates['Test']['required_params'] == ['problem', 'solution', 'entry_point']
 ```
 
-2. **Add parameter verification to fixer**:
+2. **Add parameter verification to builder**:
 ```python
-# In workflow_code_fixer.py, add method:
+# In workflow_code_builder.py, add method:
 def _check_operator_parameters(self, code: str) -> List[str]:
     """Verify all operator calls have required parameters"""
     issues = []

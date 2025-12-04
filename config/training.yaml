@@ -25,7 +25,7 @@ clip_range: 0.2
 max_grad_norm: 1.0
 weight_decay: 0.01
 use_kl_loss: true
-kl_loss_coef: 0.005                   # ✨ PHASE 3: Changed 0.1→0.005 (Allow more policy drift, faster learning)
+kl_loss_coef: 0.02                    # ✅ FIXED: Changed 0.005→0.02 (Conservative stability, prevent policy drift)
 
 # ============================================
 # Temperature Scheduling - ✨ PHASE 3: ENABLED
@@ -33,9 +33,9 @@ kl_loss_coef: 0.005                   # ✨ PHASE 3: Changed 0.1→0.005 (Allow 
 # ✨ PHASE 3: Enable dynamic temperature for better exploration-exploitation tradeoff
 temperature_schedule:
   enabled: true               # ✨ PHASE 3: Changed false→true (Enable temperature scheduling)
-  initial: 0.5                # ✨ Early: Higher temp for exploration
-  final: 0.15                 # ✨ Late: Lower temp for exploitation
-  warmup_steps: 150           # ✨ 150 steps to reach from 0.5→0.15
+  initial: 0.5                # Early training: Higher temp = Diverse exploration
+  final: 0.15                 # Late training: Lower temp = Focused exploitation
+  warmup_steps: 150           # Linear decrease: 0.5 → 0.15 over first 150 steps
 
 # 生成配置（备用，当temperature_schedule.enabled=false时使用）
 generation_config:
@@ -69,10 +69,7 @@ domain_ratios:
 # ============================================
 # Reward & Evaluation
 # ============================================
-reward_weights:
-  correctness: 0.7          # 正确性权重
-  efficiency: 0.2           # 效率权重
-  code_quality: 0.1         # 代码质量权重
+# NOTE: reward_weights removed - not used by RewardComputerV2 (5-tier system)
 
 # 评估策略（无验证集设计）
 eval_every: 0               # 禁用在线测试集评估（避免测试集泄露）
@@ -101,7 +98,7 @@ execution_timeout: 180                     # 执行超时（秒）
 # ✨ PHASE 1 UPDATE: Adjusted threshold for 5-tier system
 experience_buffer:
   buffer_size: 100
-  reward_threshold: 0.7      # ✨ Changed 8.0→0.7 (Tier 4: good/very close answers)
+  reward_threshold: 0.4      # ✅ FIXED: Changed 0.7→0.4 (Include Tier 3+ samples for early training)
   persistence_dir: "data/experience_buffer"
 
 # ============================================

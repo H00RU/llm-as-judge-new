@@ -67,7 +67,7 @@ Tier 1 (0.0)  ← Completely wrong
 - `answer_extractor_v2.py`: Enhanced answer extraction with 6-level fallback
 - `reward_computer_v2.py`: 5-tier reward computation
 
-### 3. Workflow Generation (`src/prompt_optimizer.py`, `src/workflow_code_fixer.py`)
+### 3. Workflow Generation (`src/prompt_optimizer.py`, `src/workflow_code_builder.py`)
 
 **Generator**: Qwen2.5-7B-Instruct (trained with GRPO)
 
@@ -81,7 +81,7 @@ Tier 1 (0.0)  ← Completely wrong
 **Code Quality Assurance**:
 
 1. **Generation** → PromptOptimizer produces draft code
-2. **Fixing** → WorkflowCodeFixer auto-fixes common errors
+2. **Building & Fixing** → WorkflowCodeBuilder constructs and auto-fixes code
 3. **Validation** → WorkflowValidator checks:
    - Syntax correctness
    - Class/method presence
@@ -212,7 +212,7 @@ Generated Workflow Code
             ↓
 Generated Code ✅
             ↓
-[WorkflowCodeFixer] (optional auto-fix)
+[WorkflowCodeBuilder] (build & auto-fix)
             ↓
 [AFlow Executor] → Execute with operators
             ↓

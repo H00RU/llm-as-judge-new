@@ -166,7 +166,7 @@ AttributeError: 'Workflow' object has no attribute 'undefined_op'
     ├─ 包含 operator 调用
     └─ 返回 (solution, cost) 元组
     ↓
-[WorkflowCodeFixer] 自动修复常见错误
+[WorkflowCodeBuilder] 构建和修复代码
     ├─ 修复拼写错误
     ├─ 添加变量初始化
     ├─ 修复 dict 访问
@@ -464,7 +464,7 @@ async def __call__(self, problem: str):
 │ 初始化位:   __init__ 中                            │
 │ 返回值:      (solution: str, cost: float)          │
 │ 验证方式:    AST 解析 + 语法检查                    │
-│ 调试工具:    WorkflowValidator + WorkflowCodeFixer │
+│ 调试工具:    WorkflowValidator + WorkflowCodeBuilder│
 └─────────────────────────────────────────────────────┘
 ```
 

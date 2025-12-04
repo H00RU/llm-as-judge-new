@@ -178,13 +178,21 @@ class GRPOTrainer:
         print("\n🤖 加载RL模型...")
         self._load_rl_model()
 
-        # 3. RL工作流生成器
+        # 3. RL工作流生成器（使用共享模型）
         print("\n🔧 初始化工作流生成器...")
         self.generator = RLWorkflowGenerator(
-            base_model=self.config['base_model'],
-            device_ids=self.config['device_mapping'],
+            model=self.model,  # ✨ Pass shared model reference
+            tokenizer=self.tokenizer,  # ✨ Pass shared tokenizer
+            device=self.model.device,  # ✨ Pass shared device
             operator_descriptions_path=self.config.get('aflow_operator_descriptions_path')
         )
+        print(f"  ✅ 模型共享验证:")
+        print(f"    Trainer模型ID: {id(self.model)}")
+        print(f"    Generator模型ID: {id(self.generator.model)}")
+        if id(self.model) == id(self.generator.model):
+            print(f"    ✅ 模型共享成功！节省 ~15GB GPU内存")
+        else:
+            print(f"    ❌ 警告: 模型未共享，存在内存浪费！")
 
         # 4. ExperienceBuffer - 高质量样本管理（需先初始化，用于后续组件）
         print("\n📚 初始化ExperienceBuffer...")
@@ -284,6 +292,28 @@ class GRPOTrainer:
 
             print(f"✅ LoRA应用完成")
             self.model.print_trainable_parameters()
+
+        # ✨ Log GPU memory after model loading
+        self._log_gpu_memory("Model Loaded")
+
+    def _log_gpu_memory(self, stage: str):
+        """Log current GPU memory usage
+
+        Args:
+            stage: Description of current training stage
+        """
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+            reserved = torch.cuda.memory_reserved() / 1024**3  # GB
+            total = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
+            free = total - allocated
+
+            print(f"\n🔍 GPU Memory [{stage}]:")
+            print(f"  📊 Allocated: {allocated:.2f} GB")
+            print(f"  📦 Reserved: {reserved:.2f} GB")
+            print(f"  ✅ Free: {free:.2f} GB")
+            print(f"  💾 Total: {total:.2f} GB")
+            print(f"  📈 Usage: {(allocated/total)*100:.1f}%")
 
     def get_current_temperature(self, step: int) -> float:
         """
@@ -500,6 +530,9 @@ class GRPOTrainer:
 
         # 3. 策略梯度更新
         print(f"\n🔄 更新策略...")
+        # ✨ Log memory before policy update
+        self._log_gpu_memory("Before Policy Update")
+
         loss, kl_div = await self._update_policy(
             problems=all_problems,
             workflows=all_workflows,
@@ -507,6 +540,9 @@ class GRPOTrainer:
             advantages=all_rewards,
             problem_types=[s['problem_type'] for s in batch for _ in range(num_sequences)]
         )
+
+        # ✨ Log memory after policy update
+        self._log_gpu_memory("After Policy Update")
 
         # 4. 指标 - ✨ Updated for 5-tier system
         # ✨ Threshold: tier 4+ (reward >= 0.7) = success
@@ -663,17 +699,28 @@ class GRPOTrainer:
                 advantage = advantages[j]
                 problem_type = problem_types[j]
 
-                # 计算新log概率
+                # 计算新log概率 WITH gradients
                 new_log_prob = await self._compute_log_prob_trainable(problem, workflow, problem_type)
 
-                # 重要性采样比
-                ratio = torch.exp(new_log_prob - old_log_prob.to(self.model.device))
+                # ✅ CRITICAL FIX: Remove torch.no_grad() - we need gradients for PPO!
+                # Compute PPO loss components (all operations keep gradients)
+                old_log_prob_device = old_log_prob.to(self.model.device)
+                ratio = torch.exp(new_log_prob - old_log_prob_device)
 
-                # PPO裁剪损失
+                # PPO裁剪
                 clip_range = self.config['clip_range']
                 clipped_ratio = torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range)
 
-                advantage_tensor = torch.tensor(advantage, device=self.model.device)
+                # Advantage tensor (constant, no gradients needed)
+                advantage_tensor = torch.tensor(
+                    advantage,
+                    device=self.model.device,
+                    dtype=torch.bfloat16,
+                    requires_grad=False  # Advantage is constant
+                )
+
+                # ✅ CRITICAL FIX: Remove .requires_grad_() - gradients flow naturally
+                # PPO裁剪损失
                 policy_loss = -torch.min(
                     ratio * advantage_tensor,
                     clipped_ratio * advantage_tensor
@@ -681,7 +728,9 @@ class GRPOTrainer:
 
                 # KL正则化
                 if self.config.get('use_kl_loss'):
-                    kl_loss = self.config['kl_loss_coef'] * (new_log_prob - old_log_prob.to(self.model.device)).pow(2)
+                    kl_loss = self.config['kl_loss_coef'] * (
+                        new_log_prob - old_log_prob_device
+                    ).pow(2)
                 else:
                     kl_loss = 0.0
 
@@ -692,22 +741,32 @@ class GRPOTrainer:
                 batch_loss += loss
                 batch_kl += kl_loss if isinstance(kl_loss, torch.Tensor) else 0.0
 
-            # 平均
+                # ✅ Cleanup (but don't delete tensors in computation graph)
+                del old_log_prob_device, advantage_tensor
+
+            # 平均 (normalize by accumulation steps)
             batch_loss = batch_loss / min(grad_accum_steps, len(workflows) - i)
 
             # 反向传播
             batch_loss.backward()
 
-            total_loss += batch_loss.item()
+            # ✅ Cleanup AFTER backward pass
+            batch_loss_value = batch_loss.item()
+            del batch_loss
+            torch.cuda.empty_cache()
+
+            total_loss += batch_loss_value
             total_kl += batch_kl.item() if isinstance(batch_kl, torch.Tensor) else batch_kl
             num_updates += 1
 
-            # 优化器步骤
-            if (i + grad_accum_steps) % grad_accum_steps == 0:
+            # 优化器步骤 (every grad_accum_steps or at end of batch)
+            if (i + grad_accum_steps) >= len(workflows) or (i // grad_accum_steps + 1) * grad_accum_steps >= len(workflows):
                 # 梯度裁剪
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.get('max_grad_norm', 1.0))
                 self.optimizer.step()
-                self.optimizer.zero_grad()
+                # ✅ Use set_to_none=True to free memory
+                self.optimizer.zero_grad(set_to_none=True)
+                torch.cuda.empty_cache()
 
         avg_loss = total_loss / max(num_updates, 1)
         avg_kl = total_kl / max(num_updates, 1)
@@ -720,7 +779,13 @@ class GRPOTrainer:
         workflow_code: str,
         problem_type: str
     ) -> torch.Tensor:
-        """计算工作流的log概率（新策略，可训练）"""
+        """计算工作流的log概率（新策略，可训练）
+
+        ✅ CRITICAL FIX: Keep gradients for proper PPO backpropagation
+        - Forward pass builds computation graph
+        - Returns log_prob WITH gradients (no .detach())
+        - Gradients flow naturally through PPO loss computation
+        """
 
         # 构建完整文本
         prompt = self.generator._build_generation_prompt(problem, problem_type)
@@ -729,13 +794,16 @@ class GRPOTrainer:
         # Tokenize
         inputs = self.tokenizer(full_text, return_tensors="pt").to(self.model.device)
 
-        # 前向传播
-        outputs = self.model(**inputs, labels=inputs["input_ids"])
+        # 前向传播 WITH gradients (needed for backprop)
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+            outputs = self.model(**inputs, labels=inputs["input_ids"])
+            # ✅ CRITICAL: Keep gradients! No .detach()
+            log_prob = -outputs.loss
 
-        # 负对数似然 -> log概率
-        log_prob = -outputs.loss
+        # Cleanup intermediate tensors
+        del inputs, outputs
 
-        return log_prob
+        return log_prob  # Returns tensor WITH gradients
 
     async def evaluate_on_val_set(self, num_samples: int = 50) -> Dict:
         """

@@ -98,11 +98,11 @@ IMPORTANT: First, ANALYZE the problem's difficulty and complexity.
 🚨 CRITICAL RULES FOR OPERATOR INITIALIZATION AND CALLS:
 
 1️⃣ OPERATOR CLASS NAMES (PascalCase - VERY IMPORTANT):
-   ✅ CORRECT: self.custom = operator.Custom(self.llm)
-   ✅ CORRECT: self.answer_generate = operator.AnswerGenerate(self.llm)
-   ✅ CORRECT: self.test = operator.Test(self.llm)
-   ❌ WRONG: self.custom = operator.custom(self.llm)
-   ❌ WRONG: self.answer_generate = operator.answer_generate(self.llm)
+   ✅ CORRECT: self.custom = Custom(self.llm)
+   ✅ CORRECT: self.answer_generate = AnswerGenerate(self.llm)
+   ✅ CORRECT: self.test = Test(self.llm)
+   ❌ WRONG: self.custom = custom(self.llm)
+   ❌ WRONG: self.answer_generate = answer_generate(self.llm)
 
 98|⚡ PERFORMANCE CRITICAL - AVOID REDUNDANT CALLS:
    ✅ CORRECT: Cache operator results and reuse them
@@ -124,10 +124,10 @@ IMPORTANT: First, ANALYZE the problem's difficulty and complexity.
 3️⃣ Example INCORRECT calls (WILL FAIL):
    ❌ await self.test(problem=problem)  # Missing solution and entry_point!
    ❌ await self.review(solution=code)  # Missing problem!
-   ❌ self.custom = operator.custom(self.llm)  # Wrong case!
+   ❌ self.custom = custom(self.llm)  # Wrong case!
 
 4️⃣ Example CORRECT calls (WILL WORK):
-   ✅ self.custom = operator.Custom(self.llm)  # Correct case!
+   ✅ self.custom = Custom(self.llm)  # Correct case!
    ✅ await self.test(problem=problem, solution=solution, entry_point=entry_point)
    ✅ await self.review(problem=problem, solution=code)
 
@@ -186,13 +186,13 @@ class Workflow:
         self.dataset = dataset
         self.llm = create_llm_instance(llm_config)
         # Initialize operators you need (ONLY the ones you will use):
-        # self.custom = operator.Custom(self.llm)
-        # self.answer_generate = operator.AnswerGenerate(self.llm)
-        # self.programmer = operator.Programmer(self.llm)
-        # self.sc_ensemble = operator.ScEnsemble(self.llm)
-        # self.test = operator.Test(self.llm)
-        # self.review = operator.Review(self.llm)
-        # self.revise = operator.Revise(self.llm)
+        # self.custom = Custom(self.llm)
+        # self.answer_generate = AnswerGenerate(self.llm)
+        # self.programmer = Programmer(self.llm)
+        # self.sc_ensemble = ScEnsemble(self.llm)
+        # self.test = Test(self.llm)
+        # self.review = Review(self.llm)
+        # self.revise = Revise(self.llm)
 
     {call_signature}
         {call_comment}

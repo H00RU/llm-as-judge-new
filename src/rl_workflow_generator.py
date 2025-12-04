@@ -12,67 +12,101 @@ from typing import Dict, List, Optional, Tuple
 import sys
 import os
 
+from src.workflow_code_builder import WorkflowCodeBuilder
+from src.workflow_consistency_checker import WorkflowConsistencyChecker
+
 class RLWorkflowGenerator:
     """使用RL训练的Qwen2.5-7B生成优化的工作流"""
 
     def __init__(
         self,
-        base_model: str = "Qwen/Qwen2.5-7B-Instruct",
+        model=None,
+        tokenizer=None,
+        device=None,
+        base_model: Optional[str] = None,
         lora_checkpoint: Optional[str] = None,
-        device_ids: List[int] = [2, 3],
+        device_ids: Optional[List[int]] = None,
         operator_descriptions_path: Optional[str] = None,
         config: Optional[Dict] = None
     ):
         """
         Args:
-            base_model: 基座模型路径
+            model: 共享的模型实例（优先使用，若提供则不加载新模型）
+            tokenizer: 共享的tokenizer实例（优先使用）
+            device: 共享的设备（优先使用）
+            base_model: 基座模型路径（仅在model=None时使用）
             lora_checkpoint: LoRA检查点路径（None表示使用基座模型）
-            device_ids: 使用的GPU ID列表
+            device_ids: 使用的GPU ID列表（仅在device=None时使用）
             operator_descriptions_path: AFlow算子描述文件路径
             config: 额外配置
         """
-        self.base_model = base_model
-        self.lora_checkpoint = lora_checkpoint
-        self.device_ids = device_ids
-        self.device = f"cuda:{device_ids[0]}" if torch.cuda.is_available() else "cpu"
         self.config = config or {}
 
-        # 设置CUDA设备
-        if torch.cuda.is_available():
-            os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(map(str, device_ids))
+        # ✨ NEW: Support model sharing from GRPO Trainer
+        if model is not None:
+            print(f"🔧 初始化RL工作流生成器（使用共享模型）")
+            print(f"  🔗 共享模型ID: {id(model)}")
+            self.model = model
+            self.tokenizer = tokenizer
+            self.device = device
+            self.base_model = None  # Not needed when sharing
+            self.lora_checkpoint = None
+            self.device_ids = None
+            print(f"  设备: {self.device}")
+            print(f"  ✅ 模型共享成功 - 节省 ~15GB GPU内存")
+        else:
+            # Legacy path: Load own model (for standalone usage)
+            print(f"🔧 初始化RL工作流生成器（独立模式）")
 
-        print(f"🔧 初始化RL工作流生成器")
-        print(f"  设备: {self.device}")
-        print(f"  GPU: {device_ids}")
+            if base_model is None:
+                base_model = "Qwen/Qwen2.5-7B-Instruct"
+            if device_ids is None:
+                device_ids = [2, 3]
 
-        # 加载tokenizer
-        print(f"📥 加载tokenizer: {base_model}")
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            base_model,
-            trust_remote_code=True
-        )
+            self.base_model = base_model
+            self.lora_checkpoint = lora_checkpoint
+            self.device_ids = device_ids
+            self.device = f"cuda:{device_ids[0]}" if torch.cuda.is_available() else "cpu"
 
-        # 设置pad_token
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+            # 设置CUDA设备
+            if torch.cuda.is_available():
+                os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(map(str, device_ids))
 
-        # 加载模型
-        print(f"📥 加载基座模型: {base_model}")
-        self.model = AutoModelForCausalLM.from_pretrained(
-            base_model,
-            torch_dtype=torch.bfloat16,
-            device_map={"": self.device},
-            trust_remote_code=True
-        )
+            print(f"  设备: {self.device}")
+            print(f"  GPU: {device_ids}")
 
-        # 加载LoRA权重（如果有）
-        if lora_checkpoint:
-            print(f"📥 加载LoRA检查点: {lora_checkpoint}")
-            self.model = PeftModel.from_pretrained(self.model, lora_checkpoint)
-            self.model.eval()
+            # 加载tokenizer
+            print(f"📥 加载tokenizer: {base_model}")
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                base_model,
+                trust_remote_code=True
+            )
+
+            # 设置pad_token
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+
+            # 加载模型
+            print(f"📥 加载基座模型: {base_model}")
+            self.model = AutoModelForCausalLM.from_pretrained(
+                base_model,
+                torch_dtype=torch.bfloat16,
+                device_map={"": self.device},
+                trust_remote_code=True
+            )
+
+            # 加载LoRA权重（如果有）
+            if lora_checkpoint:
+                print(f"📥 加载LoRA检查点: {lora_checkpoint}")
+                self.model = PeftModel.from_pretrained(self.model, lora_checkpoint)
+                self.model.eval()
 
         # 加载算子描述
         self.operator_descriptions = self._load_operator_descriptions(operator_descriptions_path)
+
+        # 初始化代码构建器和一致性检查器
+        self.code_builder = WorkflowCodeBuilder()
+        self.consistency_checker = WorkflowConsistencyChecker()
 
         print(f"✅ RL工作流生成器初始化完成")
 
@@ -139,7 +173,7 @@ Available Operators:
 
 Template:
 
-import workspace.{problem_type}.workflows.template.operator as operator
+from scripts.operators import Custom, AnswerGenerate, Programmer, Test, Review, Revise, ScEnsemble
 from scripts.async_llm import create_llm_instance
 from scripts.evaluator import DatasetType
 
@@ -149,8 +183,8 @@ class Workflow:
         self.dataset = dataset
         self.llm = create_llm_instance(llm_config)
         # Initialize Programmer and Test (required for code problems)
-        self.programmer = operator.Programmer(self.llm)
-        self.test = operator.Test(self.llm)
+        self.programmer = Programmer(self.llm)
+        self.test = Test(self.llm)
 
     async def __call__(self, problem: str, entry_point: str, test: str):
         # Solve: {problem}
@@ -217,7 +251,7 @@ Available Operators:
 
 Template (complete the __call__ method):
 
-import workspace.{problem_type}.workflows.template.operator as operator
+from scripts.operators import Custom, AnswerGenerate, Programmer, Test, Review, Revise, ScEnsemble
 from scripts.async_llm import create_llm_instance
 from scripts.evaluator import DatasetType
 
@@ -229,24 +263,24 @@ class Workflow:
 
         # ⚠️ CRITICAL: Initialize ALL operators you will use in __call__!
         # Example 1: If you only need answer_generate:
-        # self.answer_generate = operator.AnswerGenerate(self.llm)
+        # self.answer_generate = AnswerGenerate(self.llm)
 
         # Example 2: If you need review:
-        # self.answer_generate = operator.AnswerGenerate(self.llm)
-        # self.review = operator.Review(self.llm)
+        # self.answer_generate = AnswerGenerate(self.llm)
+        # self.review = Review(self.llm)
 
         # Example 3: Full workflow with programmer and test:
-        # self.programmer = operator.Programmer(self.llm)
-        # self.test = operator.Test(self.llm)
-        # self.review = operator.Review(self.llm)
+        # self.programmer = Programmer(self.llm)
+        # self.test = Test(self.llm)
+        # self.review = Review(self.llm)
 
         # Available operators (initialize only what you need):
-        # self.custom = operator.Custom(self.llm)
-        # self.answer_generate = operator.AnswerGenerate(self.llm)
-        # self.programmer = operator.Programmer(self.llm)
-        # self.test = operator.Test(self.llm)
-        # self.review = operator.Review(self.llm)
-        # self.sc_ensemble = operator.ScEnsemble(self.llm)
+        # self.custom = Custom(self.llm)
+        # self.answer_generate = AnswerGenerate(self.llm)
+        # self.programmer = Programmer(self.llm)
+        # self.test = Test(self.llm)
+        # self.review = Review(self.llm)
+        # self.sc_ensemble = ScEnsemble(self.llm)
 
     async def __call__(self, problem: str):
         # Solve: {problem}
@@ -372,7 +406,11 @@ class Workflow:
         return result
 
     def _parse_workflow_code(self, generated_text: str, problem_type: str) -> Tuple[str, bool, Optional[str]]:
-        """解析生成的文本，提取并验证工作流代码"""
+        """
+        解析生成的文本，提取并完整重构工作流代码
+
+        新策略：使用WorkflowCodeBuilder完整重构而非逐层补救
+        """
 
         # DEBUG: 打印 Qwen 生成的原始文本
         print(f"\n{'='*60}")
@@ -381,115 +419,38 @@ class Workflow:
         print(generated_text)  # 打印完整文本
         print(f"{'='*60}\n")
 
-        # 提取代码块
-        code_start = generated_text.find("```python")
-        if code_start == -1:
-            # 没有markdown代码块，尝试直接查找class定义
-            code_start = generated_text.find("class Workflow:")
-            if code_start == -1:
-                print(f"⚠️  未找到 'class Workflow:'，使用默认工作流")
-                return self._get_default_workflow(problem_type), False, "No Workflow class found in output"
-
-            code = generated_text[code_start:]
-        else:
-            code_start += len("```python\n")
-            code_end = generated_text.find("```", code_start)
-
-            if code_end == -1:
-                code = generated_text[code_start:]
-            else:
-                code = generated_text[code_start:code_end]
-
-        # 去除首尾空白
-        code = code.strip()
-
-        # ⚠️ 方案1：自动修复缺失的operator初始化
-        code = self._validate_and_fix_workflow(code, problem_type)
-
-        # 验证语法
+        # 使用 WorkflowCodeBuilder 进行完整重构
         try:
-            ast.parse(code)
-            is_valid = True
-            error = None
-        except SyntaxError as e:
-            is_valid = False
-            error = f"Syntax error: {str(e)}"
-            # 返回默认工作流
-            code = self._get_default_workflow(problem_type)
+            print(f"🔨 使用 WorkflowCodeBuilder 完整重构工作流代码...")
+            code, success, error = self.code_builder.build_from_qwen_output(
+                qwen_text=generated_text,
+                problem_type=problem_type,
+                strict=False  # 不严格模式，失败时返回error而非抛异常
+            )
 
-        return code, is_valid, error
+            if success:
+                print(f"✅ 代码重构成功")
+                # 验证一致性
+                result = self.consistency_checker.check_consistency(code)
+                if result['consistent']:
+                    print(f"✅ 一致性检查通过")
+                    return code, True, None
+                else:
+                    print(f"⚠️ 一致性检查警告: {result['issues']}")
+                    # 仍然返回代码，但标记为有问题
+                    return code, False, f"Consistency check: {result['issues']}"
+            else:
+                print(f"❌ 代码重构失败: {error}")
+                # 使用默认工作流
+                return self._get_default_workflow(problem_type), False, error
 
-    def _validate_and_fix_workflow(self, code: str, problem_type: str) -> str:
-        """验证并自动修复workflow中缺失的operator初始化
-
-        Args:
-            code: 生成的workflow代码
-            problem_type: 问题类型
-
-        Returns:
-            修复后的代码
-        """
-        import re
-
-        # 1. 提取__init__中已初始化的operators
-        initialized_ops = set()
-        init_section = re.search(r'def __init__\([^)]+\):[\s\S]+?(?=\n    async def|\n    def|$)', code)
-        if init_section:
-            init_code = init_section.group(0)
-            # 匹配 self.xxx = operator.XXX(self.llm)
-            init_patterns = re.findall(r'self\.(\w+)\s*=\s*operator\.(\w+)\(', init_code)
-            for attr_name, op_name in init_patterns:
-                initialized_ops.add(attr_name)
-
-        # 2. 提取__call__中使用的operators
-        used_ops = set()
-        call_section = re.search(r'async def __call__\([^)]+\):[\s\S]+', code)
-        if call_section:
-            call_code = call_section.group(0)
-            # 匹配 await self.xxx(...)
-            used_patterns = re.findall(r'await self\.(\w+)\(', call_code)
-            for op_name in used_patterns:
-                used_ops.add(op_name)
-
-        # 3. 找出缺失的operators
-        missing_ops = used_ops - initialized_ops
-
-        if missing_ops:
-            print(f"\n⚠️  检测到缺失的operator初始化: {missing_ops}")
-            print(f"   已初始化: {initialized_ops}")
-            print(f"   已使用: {used_ops}")
-
-            # 4. 自动添加缺失的初始化代码
-            # 找到 self.llm = create_llm_instance(...) 的位置
-            llm_init_match = re.search(r'(\s+)(self\.llm = create_llm_instance\([^)]+\))', code)
-            if llm_init_match:
-                indent = llm_init_match.group(1)
-                llm_init_line = llm_init_match.group(2)
-
-                # 构建缺失的初始化代码
-                missing_inits = []
-                for op_name in sorted(missing_ops):
-                    # 推断operator类名（首字母大写+驼峰命名）
-                    # answer_generate -> AnswerGenerate
-                    # review -> Review
-                    op_class_name = ''.join(word.capitalize() for word in op_name.split('_'))
-
-                    # 检查是否是有效的operator（从prompt中获取）
-                    valid_operators = ['Custom', 'AnswerGenerate', 'Programmer', 'Test', 'Review', 'Revise', 'ScEnsemble']
-                    if op_class_name in valid_operators:
-                        missing_inits.append(f"{indent}self.{op_name} = operator.{op_class_name}(self.llm)")
-
-                if missing_inits:
-                    # 在 self.llm = ... 之后插入
-                    insert_code = '\n' + '\n'.join(missing_inits)
-                    code = code.replace(llm_init_line, llm_init_line + insert_code)
-                    print(f"✅ 自动添加了 {len(missing_inits)} 个缺失的operator初始化")
-
-        return code
+        except Exception as e:
+            print(f"❌ 异常捕获: {str(e)}")
+            return self._get_default_workflow(problem_type), False, str(e)
 
     def _get_default_workflow(self, problem_type: str = "math") -> str:
         """默认工作流（当生成失败时）"""
-        return f"""import workspace.{problem_type}.workflows.template.operator as operator
+        return f"""from scripts.operators import Custom, AnswerGenerate, Programmer, Test, Review, Revise, ScEnsemble
 from scripts.async_llm import create_llm_instance
 from scripts.evaluator import DatasetType
 
@@ -498,7 +459,7 @@ class Workflow:
         self.name = name
         self.dataset = dataset
         self.llm = create_llm_instance(llm_config)
-        self.custom = operator.Custom(self.llm)
+        self.custom = Custom(self.llm)
 
     async def __call__(self, problem: str):
         solution = await self.custom(input=problem, instruction="Solve this problem step by step.")
