@@ -101,26 +101,36 @@ class ResponseStandardizer:
 
     @staticmethod
     def _standardize_programmer(resp: Dict) -> Dict:
+        # Check for error status (new enhanced operators return success flag)
+        is_success = resp.get('success', not ('error' in resp))
+        error_msg = resp.get('error', None) if not is_success else None
+
         return {
-            'success': True,
+            'success': is_success,
             'content': resp.get('code', ''),
             'metadata': {
                 'output': resp.get('output', ''),
+                'execution_success': is_success,
                 'original': resp
             },
-            'error': None
+            'error': error_msg
         }
 
     @staticmethod
     def _standardize_test(resp: Dict) -> Dict:
+        # Use new success flag if available, otherwise fallback to result flag
+        is_success = resp.get('success', resp.get('result', resp.get('test_passed', False)))
+        error_msg = resp.get('error', None) if not is_success else None
+
         return {
-            'success': resp.get('result', False),
+            'success': is_success,
             'content': resp.get('solution', ''),
             'metadata': {
-                'test_result': resp.get('result', False),
+                'test_result': resp.get('result', resp.get('test_passed', False)),
+                'test_passed': resp.get('test_passed', resp.get('result', False)),
                 'original': resp
             },
-            'error': None if resp.get('result', False) else 'Test failed'
+            'error': error_msg if error_msg else (None if is_success else 'Test failed')
         }
 
     @staticmethod
@@ -137,27 +147,36 @@ class ResponseStandardizer:
         if isinstance(review_result, str):
             review_result = 'pass' in review_result.lower() or 'success' in review_result.lower()
 
+        # Use new success flag if available
+        is_success = resp.get('success', True)
+        error_msg = resp.get('error', None)
+
         return {
-            'success': True,
+            'success': is_success,
             'content': feedback,
             'metadata': {
                 'review_result': review_result,
                 'feedback': feedback,
                 'original': resp
             },
-            'error': None
+            'error': error_msg
         }
 
     @staticmethod
     def _standardize_revise(resp: Dict) -> Dict:
+        # Use new success flag if available
+        is_success = resp.get('success', True)
+        error_msg = resp.get('error', None)
+
         return {
-            'success': True,
+            'success': is_success,
             'content': resp.get('solution', resp.get('code', '')),
             'metadata': {
                 'solution': resp.get('solution', ''),
+                'revision_success': is_success,
                 'original': resp
             },
-            'error': None
+            'error': error_msg
         }
 
     @staticmethod

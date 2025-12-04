@@ -4,7 +4,7 @@
 # ============================================
 # Model Configuration
 # ============================================
-base_model: "/root/llm-as-judge-new/models"  # ✅ 本地模型路径（无嵌套）
+base_model: "/root/llm-as-judge-new/models/Qwen2.5-7B-Instruct"  # ✅ 完整的本地模型路径
 device_mapping: [0]      # GPU ID
 physical_gpus: [0]       # 实际物理GPU ID
 bf16: false              # 使用float16精度
@@ -12,35 +12,35 @@ bf16: false              # 使用float16精度
 # ============================================
 # Training Parameters
 # ============================================
-# 核心训练目标：500 steps x 4 batch x 6 workflow per batch = 12,000个工作流
-max_steps: 500                        # ✅ 用户需求：500步（总步数保持）
-rollout_batch_size: 4                 # ✅ 恢复到4（用户要求）
-num_return_sequences_in_group: 6      # ✅ 用户需求：6 workflows per problem (GRPO组)
+# ✨ PHASE 3 OPTIMIZATION: Reduced K, optimized KL and gradient accumulation
+max_steps: 500
+rollout_batch_size: 5                 # ✨ Increased from 4 to 5 (5 samples per batch)
+num_return_sequences_in_group: 2      # ✨ PHASE 3: Changed 6→2 (Total: 5×2=10 workflows, reduced from 24)
 
-# Learning & Optimization
-learning_rate: 2.0e-5   # ✅ 恢复到reference值（2.0e-5 = 0.00002）
-warmup_steps: 100       # ✅ 保持100步（总步数的20%）
-gradient_accumulation_steps: 1
+# Learning & Optimization - ✨ OPTIMIZED
+learning_rate: 2.0e-5
+warmup_steps: 100
+gradient_accumulation_steps: 4        # ✨ PHASE 3: Changed 1→4 (Stabilize training, reduce OOM)
 clip_range: 0.2
 max_grad_norm: 1.0
 weight_decay: 0.01
 use_kl_loss: true
-kl_loss_coef: 0.1
+kl_loss_coef: 0.005                   # ✨ PHASE 3: Changed 0.1→0.005 (Allow more policy drift, faster learning)
 
 # ============================================
-# Temperature Scheduling
+# Temperature Scheduling - ✨ PHASE 3: ENABLED
 # ============================================
-# ✅ 用户需求：固定温度为0.4（禁用动态调度）
+# ✨ PHASE 3: Enable dynamic temperature for better exploration-exploitation tradeoff
 temperature_schedule:
-  enabled: false              # ❌ 禁用动态调度
-  initial: 0.4                # 固定值
-  final: 0.4                  # 固定值（不使用）
-  warmup_steps: 0             # 不使用
+  enabled: true               # ✨ PHASE 3: Changed false→true (Enable temperature scheduling)
+  initial: 0.5                # ✨ Early: Higher temp for exploration
+  final: 0.15                 # ✨ Late: Lower temp for exploitation
+  warmup_steps: 150           # ✨ 150 steps to reach from 0.5→0.15
 
-# 生成配置（当temperature_schedule.enabled=false时使用）
+# 生成配置（备用，当temperature_schedule.enabled=false时使用）
 generation_config:
-  temperature: 0.2            # ✅ 调整到0.2（0.1过低会抑制RL探索，参考CRITICAL_REVIEW.md）
-  max_tokens: 4096            # ✅ 增大防止截断（参考reference）
+  temperature: 0.2
+  max_tokens: 4096            # ✅ Prevent truncation
   top_p: 0.95
   top_k: 50
 
@@ -98,9 +98,10 @@ execution_timeout: 180                     # 执行超时（秒）
 # ============================================
 # Experience Buffer (高质量样本存储)
 # ============================================
+# ✨ PHASE 1 UPDATE: Adjusted threshold for 5-tier system
 experience_buffer:
   buffer_size: 100
-  reward_threshold: 8.0      # 仅保存reward>=8.0的样本
+  reward_threshold: 0.7      # ✨ Changed 8.0→0.7 (Tier 4: good/very close answers)
   persistence_dir: "data/experience_buffer"
 
 # ============================================
@@ -125,35 +126,37 @@ wandb:
   # api_key从环境变量读取: WANDB_API_KEY
 
 # ============================================
-# 训练说明 - RESTORED VERSION (恢复Reference配置)
+# 训练说明 - ✨ PHASE 3 OPTIMIZED (优化后的最终配置)
 # ============================================
-# 总样本数：500 steps × 4 batch × 6 workflows = 12,000 个工作流生成和执行
+# 总样本数：500 steps × 5 batch × 2 workflows = 5,000 个工作流生成和执行
 #
-# 参数说明（与Reference项目一致）：
-# 1. LoRA秩恢复为64（防止表达能力不足）
-# 2. 学习率调整为2.0e-5（平衡学习速度和稳定性）
-# 3. 批次大小恢复为4（标准配置）
-# 4. 温度设定为0.4（固定，不使用动态调度）
-# 5. max_tokens增加到4096（防止截断）
+# ✨ 主要优化 (Phase 3)：
+# 1. KL系数：0.1 → 0.005（20倍降低，允许更大的策略偏移）
+# 2. K值：6 → 2（并发从24→10，减少超时问题）
+# 3. 批次大小：4 → 5（增加样本多样性）
+# 4. 梯度累积：1 → 4（稳定训练，减少OOM）
+# 5. 温度调度：禁用 → 启用（0.5→0.15，平衡探索-开发）
+# 6. Experience buffer阈值：8.0 → 0.7（适配5-tier系统）
 #
 # 训练流程：
-# 1. 采样：batch_size=4，从mixed数据集（math:qa:code=4:3:3）均衡采样
-# 2. 生成：每个sample生成6个workflow（GRPO组）
+# 1. 采样：batch_size=5，从mixed数据集（math:qa:code=4:3:3）均衡采样
+# 2. 生成：每个sample生成2个workflow（GRPO组，总10个/step）
 # 3. 执行：AFlow执行器运行workflows，超时180秒
-# 4. 奖励：LLM Judge（gpt-4o-mini）计算奖励
-# 5. 更新：GRPO优化器更新LoRA权重
-# 6. 验证：每5步记录指标，每25步保存checkpoint
+# 4. 奖励：RewardComputer v2计算5-tier奖励 [0.0, 0.2, 0.4, 0.7, 1.0]
+# 5. 更新：GRPO优化器使用低KL系数更新LoRA权重
+# 6. 验证：每5步记录指标，每20步保存checkpoint
 #
-# 关键配置确认（恢复后）：
-# ✅ max_steps: 500（保持，总步数不变）
-# ✅ rollout_batch_size: 4（恢复到原值）
-# ✅ learning_rate: 2.0e-5（恢复到Reference值）
-# ✅ lora_rank: 64（恢复到原值）
-# ✅ lora_alpha: 64（对应恢复，维持 alpha/rank = 1.0）
-# ✅ lora_dropout: 0.05（调整到Reference值）
-# ✅ warmup_steps: 100（保持，对应500步训练的20%）
-# ✅ save_every: 25（保持频率）
-# ✅ num_return_sequences_in_group: 6（保持）
-# ✅ temperature: 固定为0.4（非动态调度）
-# ✅ max_tokens: 4096（增大防止截断）
+# ✨ 关键配置（Phase 3优化）：
+# ✨ max_steps: 500（保持）
+# ✨ rollout_batch_size: 5（改from 4）
+# ✨ num_return_sequences_in_group: 2（改from 6，减少并发）
+# ✨ kl_loss_coef: 0.005（改from 0.1，允许更大的策略学习）
+# ✨ gradient_accumulation_steps: 4（改from 1）
+# ✨ temperature_schedule.enabled: true（改from false）
+# ✨ temperature_schedule: 0.5→0.15 over 150 steps
+# ✨ experience_buffer.reward_threshold: 0.7（改from 8.0，5-tier系统）
+# ✅ learning_rate: 2.0e-5（保持）
+# ✅ warmup_steps: 100（保持）
+# ✅ lora_rank: 64（保持）
+# ✅ max_tokens: 4096（保持）
 # ✅ domain_ratios: math 40%, qa 30%, code 30%（保持均衡采样）

@@ -21,7 +21,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from data_manager import DataManager
 from rl_workflow_generator import RLWorkflowGenerator
 from aflow_executor import AFlowExecutor
-from reward_computer import RewardComputer
+from reward_computer_v2 import RewardComputer  # ✨ PHASE 1: NEW 5-tier reward system
 from gpu_manager import GPUManager
 from experience_buffer import ExperienceBuffer
 from prompt_optimizer import PromptOptimizer
@@ -178,14 +178,12 @@ class GRPOTrainer:
         print("\n🤖 加载RL模型...")
         self._load_rl_model()
 
-        # 3. RL工作流生成器（共享已加载的模型）
+        # 3. RL工作流生成器
         print("\n🔧 初始化工作流生成器...")
         self.generator = RLWorkflowGenerator(
             base_model=self.config['base_model'],
             device_ids=self.config['device_mapping'],
-            operator_descriptions_path=self.config.get('aflow_operator_descriptions_path'),
-            shared_model=self.model,          # ✅ 直接传递共享的模型实例，避免重复加载
-            shared_tokenizer=self.tokenizer   # ✅ 直接传递共享的tokenizer实例
+            operator_descriptions_path=self.config.get('aflow_operator_descriptions_path')
         )
 
         # 4. ExperienceBuffer - 高质量样本管理（需先初始化，用于后续组件）
@@ -225,16 +223,23 @@ class GRPOTrainer:
         )
         print(f"  执行超时: {timeout}秒")
 
-        # 8. 奖励计算器
-        print("\n🎯 初始化奖励计算器...")
+        # 8. 奖励计算器 - ✨ PHASE 1: NEW 5-tier reward system
+        print("\n🎯 初始化奖励计算器 (5-Tier System V2)...")
+        use_llm_judge = False  # Set to True if OpenAI API key available
+        if os.getenv("OPENAI_API_KEY"):
+            use_llm_judge = True
+            print("  ✅ LLM Judge enabled (gpt-4o-mini)")
+        else:
+            print("  ⚠️  LLM Judge disabled (OPENAI_API_KEY not found)")
+
         self.reward_computer = RewardComputer(
-            reward_weights=self.config.get('reward_weights'),
-            use_llm_judge=True,  # 启用LLM Judge (gpt-4o-mini)
+            use_answer_extractor=True,  # ✨ Use enhanced 6-level extraction
+            use_llm_judge=use_llm_judge,
             llm_config={
                 "base_url": "https://api.openai.com/v1",
                 "api_key": os.getenv("OPENAI_API_KEY"),
                 "model_name": "gpt-4o-mini"
-            }
+            } if use_llm_judge else None
         )
 
         # 9. 优化器
@@ -385,12 +390,11 @@ class GRPOTrainer:
                         test=sample.get('test', '')  # NEW: pass test cases for HumanEval
                     )
 
-                    # ✅ 统一的奖励计算框架 - 所有情况都由reward_computer处理
-                    # reward_computer.compute_reward()现在内部处理：
-                    # - Operator-问题类型不匹配 → -0.6
-                    # - 验证失败 → -0.4
-                    # - 执行失败 → -1.0 到 -0.7（根据错误类型）
-                    # - 执行成功 → 答案质量 + 生成质量，归一化到[-1.0, 1.0]
+                    # ✨ PHASE 1: NEW 5-tier reward system with fine-grained feedback
+                    # RewardComputer v2 returns:
+                    # - reward: [0.0, 0.2, 0.4, 0.7, 1.0] (5 tiers)
+                    # - tier: 1-5 (tier level)
+                    # - breakdown: detailed metrics per problem type
 
                     reward_result = self.reward_computer.compute_reward(
                         problem=problem,
@@ -401,17 +405,13 @@ class GRPOTrainer:
                         execution_metadata=metadata
                     )
 
-                    # 提取总奖励和明细
-                    if isinstance(reward_result, dict):
-                        reward = reward_result['total']
-                        breakdown = reward_result.get('breakdown', {})
-                    else:
-                        # 向后兼容
-                        reward = reward_result
-                        breakdown = {}
+                    # ✨ Extract 5-tier reward (replaces old [-1.0, 1.0] scale)
+                    reward = reward_result['reward']  # [0.0, 0.2, 0.4, 0.7, 1.0]
+                    tier = reward_result['tier']      # 1-5
+                    breakdown = reward_result.get('breakdown', {})
 
-                    # 提取正确性分数用于追踪
-                    correctness = breakdown.get('answer_quality', reward)
+                    # Map new 5-tier to training threshold (tier 4+ = success)
+                    correctness = 1.0 if reward >= 0.7 else (reward / 0.7)
                     correctness_scores.append(correctness)
                     group_correctness.append(correctness)
 
@@ -508,21 +508,22 @@ class GRPOTrainer:
             problem_types=[s['problem_type'] for s in batch for _ in range(num_sequences)]
         )
 
-        # 4. 指标
-        # ✨ 新增：计算准确率统计
-        num_correct = sum(1 for score in correctness_scores if score >= 5.0)
+        # 4. 指标 - ✨ Updated for 5-tier system
+        # ✨ Threshold: tier 4+ (reward >= 0.7) = success
+        num_correct = sum(1 for score in correctness_scores if score >= 0.7)
         num_total = len(correctness_scores)
         accuracy = (num_correct / num_total * 100) if num_total > 0 else 0.0
         avg_correctness = np.mean(correctness_scores) if correctness_scores else 0.0
 
-        # 计算问题类型分布的准确率
+        # ✨ Calculate problem type stats with 5-tier thresholds
         problem_type_stats = {}
         for problem_type in ['math', 'code', 'qa']:
             type_scores = [s for s, p in zip(correctness_scores,
                           [s['problem_type'] for s in batch for _ in range(num_sequences)])
                           if p == problem_type]
             if type_scores:
-                type_correct = sum(1 for s in type_scores if s >= 5.0)
+                # ✨ Tier 4+ (>= 0.7) is considered correct
+                type_correct = sum(1 for s in type_scores if s >= 0.7)
                 type_accuracy = (type_correct / len(type_scores) * 100)
                 type_avg = np.mean(type_scores)
                 problem_type_stats[problem_type] = {
@@ -546,25 +547,53 @@ class GRPOTrainer:
             "avg_correctness_score": avg_correctness
         }
 
-        print(f"\n🎯 准确率统计: {num_correct}/{num_total} = {accuracy:.1f}% (平均正确性评分: {avg_correctness:.2f}/10.0)")
+        # ✨ Update logging for 5-tier system
+        print(f"\n🎯 准确率统计 (Tier 4+): {num_correct}/{num_total} = {accuracy:.1f}% (平均正确性评分: {avg_correctness:.2f}/1.0)")
+
+        # Calculate 5-tier distribution
+        tier_dist = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+        for score in correctness_scores:
+            if score >= 0.95:
+                tier_dist[5] += 1
+            elif score >= 0.6:
+                tier_dist[4] += 1
+            elif score >= 0.4:
+                tier_dist[3] += 1
+            elif score >= 0.2:
+                tier_dist[2] += 1
+            else:
+                tier_dist[1] += 1
+
+        print(f"\n📊 5-Tier分布: ", end="")
+        for tier, count in tier_dist.items():
+            pct = 100 * count / num_total if num_total > 0 else 0
+            print(f"Tier {tier}={count}({pct:.1f}%) ", end="")
+        print()
+
         print(f"\n📊 问题类型分布:")
         for ptype, stats in problem_type_stats.items():
             print(f"  {ptype}: {stats['accuracy']:.1f}% (avg: {stats['avg_score']:.2f}, n={stats['count']})")
 
-        # ✨ 详细 wandb logging (实时仪表板)
+        # ✨ 详细 wandb logging - NEW 5-tier metrics
         wandb_log_data = {
             "train/loss": loss,
             "train/kl_div": kl_div,
-            "train/avg_reward": np.mean(all_rewards),
-            "train/max_reward": np.max(all_rewards),
-            "train/min_reward": np.min(all_rewards),
+            "train/avg_reward": np.mean(all_rewards) if all_rewards else 0,
+            "train/max_reward": np.max(all_rewards) if all_rewards else 0,
+            "train/min_reward": np.min(all_rewards) if all_rewards else 0,
             "train/accuracy": accuracy,
             "train/avg_correctness_score": avg_correctness,
             "train/num_correct": num_correct,
             "train/num_total": num_total,
-            "train/temperature": current_temp,  # 记录当前temperature
+            "train/temperature": current_temp,
             "train/step": step,
         }
+
+        # ✨ Add 5-tier distribution metrics
+        for tier, count in tier_dist.items():
+            pct = 100 * count / num_total if num_total > 0 else 0
+            wandb_log_data[f"train/tier_{tier}_count"] = count
+            wandb_log_data[f"train/tier_{tier}_pct"] = pct
 
         # 添加问题类型的分布指标
         for ptype, stats in problem_type_stats.items():
