@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 import asyncio
 import numpy as np
+import gc  # ✅ PHASE 5 FIX: For memory cleanup
 import yaml
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
@@ -277,6 +278,12 @@ class GRPOTrainer:
             device_map={"": device},
             trust_remote_code=True
         )
+
+        # ✅ FUNDAMENTAL FIX: Enable gradient checkpointing
+        # Trade compute for memory - reduces peak memory by ~40-50%
+        if self.config.get('use_gradient_checkpointing', True):
+            self.model.gradient_checkpointing_enable()
+            print("✅ Gradient checkpointing enabled (trade compute for memory)")
 
         # 应用LoRA
         if self.config.get('use_lora', True):
@@ -683,26 +690,37 @@ class GRPOTrainer:
         total_kl = 0.0
         num_updates = 0
 
-        # 梯度累积
+        # ✅ FUNDAMENTAL FIX: Add micro-batching for forward passes
+        # Process workflows in small micro-batches to prevent computation graph accumulation
+        # This is the ROOT CAUSE fix for CUDA OOM during policy update
+        microbatch_size = self.config.get('forward_pass_microbatch_size', 1)  # Default: 1 workflow at a time
         grad_accum_steps = self.config.get('gradient_accumulation_steps', 1)
 
-        for i in range(0, len(workflows), grad_accum_steps):
-            batch_slice = slice(i, min(i + grad_accum_steps, len(workflows)))
+        # ✅ REFERENCE PROJECT FIX: Aggressive memory cleanup before policy update
+        torch.cuda.empty_cache()
+        gc.collect()
 
-            batch_loss = 0.0
-            batch_kl = 0.0
+        # Process workflows in micro-batches
+        for i in range(0, len(workflows), microbatch_size):
+            microbatch_end = min(i + microbatch_size, len(workflows))
+            microbatch_loss = 0.0
+            microbatch_kl = 0.0
 
-            for j in range(i, min(i + grad_accum_steps, len(workflows))):
+            # Process each workflow in the micro-batch
+            for j in range(i, microbatch_end):
                 problem = problems[j]
                 workflow = workflows[j]
                 old_log_prob = old_log_probs[j]
                 advantage = advantages[j]
                 problem_type = problem_types[j]
 
+                # ✅ REFERENCE PROJECT FIX: Periodic cache cleanup (every 5 samples)
+                if j % 5 == 0:
+                    torch.cuda.empty_cache()
+
                 # 计算新log概率 WITH gradients
                 new_log_prob = await self._compute_log_prob_trainable(problem, workflow, problem_type)
 
-                # ✅ CRITICAL FIX: Remove torch.no_grad() - we need gradients for PPO!
                 # Compute PPO loss components (all operations keep gradients)
                 old_log_prob_device = old_log_prob.to(self.model.device)
                 ratio = torch.exp(new_log_prob - old_log_prob_device)
@@ -719,7 +737,6 @@ class GRPOTrainer:
                     requires_grad=False  # Advantage is constant
                 )
 
-                # ✅ CRITICAL FIX: Remove .requires_grad_() - gradients flow naturally
                 # PPO裁剪损失
                 policy_loss = -torch.min(
                     ratio * advantage_tensor,
@@ -737,34 +754,36 @@ class GRPOTrainer:
                 # 总损失
                 loss = policy_loss + kl_loss
 
-                # 累积
-                batch_loss += loss
-                batch_kl += kl_loss if isinstance(kl_loss, torch.Tensor) else 0.0
+                # 累积到micro-batch
+                microbatch_loss += loss
+                microbatch_kl += kl_loss if isinstance(kl_loss, torch.Tensor) else 0.0
 
-                # ✅ Cleanup (but don't delete tensors in computation graph)
-                del old_log_prob_device, advantage_tensor
+                # Cleanup
+                del old_log_prob_device, advantage_tensor, new_log_prob, ratio, clipped_ratio
 
-            # 平均 (normalize by accumulation steps)
-            batch_loss = batch_loss / min(grad_accum_steps, len(workflows) - i)
+            # Normalize loss by micro-batch size
+            microbatch_loss = microbatch_loss / (microbatch_end - i)
 
-            # 反向传播
-            batch_loss.backward()
+            # ✅ KEY FIX: Backward IMMEDIATELY after each micro-batch
+            # This prevents computation graphs from accumulating
+            microbatch_loss.backward()
 
-            # ✅ Cleanup AFTER backward pass
-            batch_loss_value = batch_loss.item()
-            del batch_loss
+            # Cleanup AFTER backward
+            microbatch_loss_value = microbatch_loss.item()
+            microbatch_kl_value = microbatch_kl.item() if isinstance(microbatch_kl, torch.Tensor) else microbatch_kl
+            del microbatch_loss, microbatch_kl
             torch.cuda.empty_cache()
 
-            total_loss += batch_loss_value
-            total_kl += batch_kl.item() if isinstance(batch_kl, torch.Tensor) else batch_kl
+            total_loss += microbatch_loss_value
+            total_kl += microbatch_kl_value
             num_updates += 1
 
-            # 优化器步骤 (every grad_accum_steps or at end of batch)
-            if (i + grad_accum_steps) >= len(workflows) or (i // grad_accum_steps + 1) * grad_accum_steps >= len(workflows):
+            # 优化器步骤 (every grad_accum_steps micro-batches)
+            if (num_updates % grad_accum_steps == 0) or (microbatch_end >= len(workflows)):
                 # 梯度裁剪
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.get('max_grad_norm', 1.0))
                 self.optimizer.step()
-                # ✅ Use set_to_none=True to free memory
+                # Use set_to_none=True to free memory
                 self.optimizer.zero_grad(set_to_none=True)
                 torch.cuda.empty_cache()
 
@@ -781,10 +800,11 @@ class GRPOTrainer:
     ) -> torch.Tensor:
         """计算工作流的log概率（新策略，可训练）
 
-        ✅ CRITICAL FIX: Keep gradients for proper PPO backpropagation
+        ✅ FUNDAMENTAL FIX: Proper gradient flow without premature tensor deletion
         - Forward pass builds computation graph
         - Returns log_prob WITH gradients (no .detach())
-        - Gradients flow naturally through PPO loss computation
+        - NO premature deletion of inputs/outputs (breaks gradient graph)
+        - Let PyTorch handle tensor lifecycle automatically
         """
 
         # 构建完整文本
@@ -800,8 +820,9 @@ class GRPOTrainer:
             # ✅ CRITICAL: Keep gradients! No .detach()
             log_prob = -outputs.loss
 
-        # Cleanup intermediate tensors
-        del inputs, outputs
+        # ✅ FUNDAMENTAL FIX: DO NOT delete inputs/outputs here!
+        # They are still needed by the computation graph for backward()
+        # PyTorch will automatically release them after backward() completes
 
         return log_prob  # Returns tensor WITH gradients
 

@@ -93,7 +93,7 @@ show_training_info() {
     echo "  训练步数: 500"
     echo "  批次大小: 5"
     echo "  K值: 2 (工作流数/样本)"
-    echo "  KL系数: 0.005"
+    echo "  KL系数: 0.02"
     echo "  梯度累积: 4"
     echo "  温度调度: 启用 (0.5 → 0.15)"
     echo "  学习率: 2.0e-5"

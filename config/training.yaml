@@ -8,6 +8,7 @@ base_model: "/root/llm-as-judge-new/models/Qwen2.5-7B-Instruct"  # ✅ 完整的
 device_mapping: [0]      # GPU ID
 physical_gpus: [0]       # 实际物理GPU ID
 bf16: false              # 使用float16精度
+use_gradient_checkpointing: true  # ✅ FUNDAMENTAL FIX: Enable gradient checkpointing (trade compute for memory, reduces peak by 40-50%)
 
 # ============================================
 # Training Parameters
@@ -21,6 +22,7 @@ num_return_sequences_in_group: 2      # ✨ PHASE 3: Changed 6→2 (Total: 5×2=
 learning_rate: 2.0e-5
 warmup_steps: 100
 gradient_accumulation_steps: 4        # ✨ PHASE 3: Changed 1→4 (Stabilize training, reduce OOM)
+forward_pass_microbatch_size: 1       # ✅ FUNDAMENTAL FIX: Process 1 workflow at a time during forward pass (prevents computation graph accumulation)
 clip_range: 0.2
 max_grad_norm: 1.0
 weight_decay: 0.01
@@ -123,17 +125,28 @@ wandb:
   # api_key从环境变量读取: WANDB_API_KEY
 
 # ============================================
-# 训练说明 - ✨ PHASE 3 OPTIMIZED (优化后的最终配置)
+# 训练说明 - ✨ PHASE 5 ROOT CAUSE FIX (根本性修复)
 # ============================================
 # 总样本数：500 steps × 5 batch × 2 workflows = 5,000 个工作流生成和执行
 #
-# ✨ 主要优化 (Phase 3)：
-# 1. KL系数：0.1 → 0.005（20倍降低，允许更大的策略偏移）
-# 2. K值：6 → 2（并发从24→10，减少超时问题）
-# 3. 批次大小：4 → 5（增加样本多样性）
-# 4. 梯度累积：1 → 4（稳定训练，减少OOM）
-# 5. 温度调度：禁用 → 启用（0.5→0.15，平衡探索-开发）
-# 6. Experience buffer阈值：8.0 → 0.7（适配5-tier系统）
+# ✨ ROOT CAUSE修复 (Phase 5 - 基于参考项目/content/llm-as-judge)：
+# 1. **移除错误的tensor删除** (_compute_log_prob_trainable):
+#    - PROBLEM: `del inputs, outputs` 破坏了梯度计算图
+#    - ROOT CAUSE: log_prob依赖这些张量，过早删除导致OOM（PyTorch重新分配内存）
+#    - SOLUTION: 让PyTorch自动管理tensor生命周期，backward()后自动释放
+# 2. **添加定期内存清理** (参考项目grpo_trainer.py:882,902-903):
+#    - 策略更新前: torch.cuda.empty_cache() + gc.collect()
+#    - 每5个样本: torch.cuda.empty_cache()
+# 3. **保持gradient checkpointing**: 减少前向传播内存 ~40%
+# 4. **保持micro-batching**: 防止梯度图过度累积
+#
+# 其他优化（Phase 1-4保留）：
+# 5. KL系数：0.1 → 0.02（稳定策略更新）
+# 6. K值：6 → 2（减少并发超时）
+# 7. 批次大小：4 → 5（增加样本多样性）
+# 8. 梯度累积：1 → 4（稳定训练）
+# 9. 温度调度：0.5→0.15（探索→开发）
+# 10. Experience buffer阈值：0.4（early training）
 #
 # 训练流程：
 # 1. 采样：batch_size=5，从mixed数据集（math:qa:code=4:3:3）均衡采样
