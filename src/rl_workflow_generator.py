@@ -21,9 +21,7 @@ class RLWorkflowGenerator:
         lora_checkpoint: Optional[str] = None,
         device_ids: List[int] = [2, 3],
         operator_descriptions_path: Optional[str] = None,
-        config: Optional[Dict] = None,
-        shared_model = None,
-        shared_tokenizer = None
+        config: Optional[Dict] = None
     ):
         """
         Args:
@@ -32,8 +30,6 @@ class RLWorkflowGenerator:
             device_ids: 使用的GPU ID列表
             operator_descriptions_path: AFlow算子描述文件路径
             config: 额外配置
-            shared_model: 来自GRPOTrainer的共享模型实例（用于避免重复加载）
-            shared_tokenizer: 来自GRPOTrainer的共享tokenizer实例
         """
         self.base_model = base_model
         self.lora_checkpoint = lora_checkpoint
@@ -49,41 +45,31 @@ class RLWorkflowGenerator:
         print(f"  设备: {self.device}")
         print(f"  GPU: {device_ids}")
 
-        # 处理tokenizer：优先使用共享的，否则加载新的
-        if shared_tokenizer is not None:
-            print(f"📥 使用共享的tokenizer（避免重复加载）")
-            self.tokenizer = shared_tokenizer
-        else:
-            # 加载tokenizer
-            print(f"📥 加载tokenizer: {base_model}")
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                base_model,
-                trust_remote_code=True
-            )
+        # 加载tokenizer
+        print(f"📥 加载tokenizer: {base_model}")
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            base_model,
+            trust_remote_code=True
+        )
 
-            # 设置pad_token
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
+        # 设置pad_token
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # 处理模型：优先使用共享的，否则加载新的
-        if shared_model is not None:
-            print(f"📥 使用共享的模型实例（避免重复加载）")
-            self.model = shared_model
-        else:
-            # 加载模型
-            print(f"📥 加载基座模型: {base_model}")
-            self.model = AutoModelForCausalLM.from_pretrained(
-                base_model,
-                torch_dtype=torch.bfloat16,
-                device_map={"": self.device},
-                trust_remote_code=True
-            )
+        # 加载模型
+        print(f"📥 加载基座模型: {base_model}")
+        self.model = AutoModelForCausalLM.from_pretrained(
+            base_model,
+            torch_dtype=torch.bfloat16,
+            device_map={"": self.device},
+            trust_remote_code=True
+        )
 
-            # 加载LoRA权重（如果有）
-            if lora_checkpoint:
-                print(f"📥 加载LoRA检查点: {lora_checkpoint}")
-                self.model = PeftModel.from_pretrained(self.model, lora_checkpoint)
-                self.model.eval()
+        # 加载LoRA权重（如果有）
+        if lora_checkpoint:
+            print(f"📥 加载LoRA检查点: {lora_checkpoint}")
+            self.model = PeftModel.from_pretrained(self.model, lora_checkpoint)
+            self.model.eval()
 
         # 加载算子描述
         self.operator_descriptions = self._load_operator_descriptions(operator_descriptions_path)
@@ -125,261 +111,110 @@ class RLWorkflowGenerator:
         }
 
     def _build_generation_prompt(self, problem: str, problem_type: str) -> str:
-        """构建提示词，明确算子 API（增强版 - 含Few-shot示例）"""
+        """构建提示词，明确算子 API，让模型自主学习选择"""
 
-        # Few-shot正确示例（3个示例覆盖不同场景）
-        few_shot_example = """━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ EXAMPLE 1: SIMPLE QA WORKFLOW (MOST COMMON)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 代码题专用模板
+        if problem_type == "code":
+            prompt = f"""Generate a Python Workflow class to solve the CODE problem.
 
-```python
-import workspace.qa.workflows.template.operator as operator
-from scripts.async_llm import create_llm_instance
-from scripts.evaluator import DatasetType
-
-class Workflow:
-    def __init__(self, name: str, llm_config, dataset: DatasetType):
-        self.name = name
-        self.dataset = dataset
-        self.model = create_llm_instance(llm_config)  # ✓ CORRECT: 'model'
-        self.answer_generate = operator.AnswerGenerate(self.model)  # ✓ CORRECT
-
-    async def __call__(self, problem: str, entry_point: str = None):
-        result = await self.answer_generate(input=problem)
-        answer = result.get('answer', '') if isinstance(result, dict) else str(result)
-        cost = self.model.get_usage_summary()["total_cost"]
-        return answer, cost
-```
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ EXAMPLE 2: CODE WORKFLOW WITH TEST
-━━━━━━━━━━━━━━━━━━━━━━━━━��━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-```python
-import workspace.code.workflows.template.operator as operator
-from scripts.async_llm import create_llm_instance
-from scripts.evaluator import DatasetType
-
-class Workflow:
-    def __init__(self, name: str, llm_config, dataset: DatasetType):
-        self.name = name
-        self.dataset = dataset
-        self.model = create_llm_instance(llm_config)  # ✓ CORRECT: 'model'
-        self.programmer = operator.Programmer(self.model)  # ✓ CORRECT
-        self.test = operator.Test(self.model)  # ✓ CORRECT
-
-    async def __call__(self, problem: str, entry_point: str = None):
-        # Generate code
-        prog_result = await self.programmer(problem=problem, analysis='')
-        code = prog_result.get('code', '') if isinstance(prog_result, dict) else str(prog_result)
-
-        # Test code if entry_point available
-        if entry_point:
-            test_result = await self.test(problem=problem, solution=code, entry_point=entry_point)
-            if isinstance(test_result, dict) and test_result.get('result', False):
-                code = test_result.get('solution', code)
-
-        cost = self.model.get_usage_summary()["total_cost"]
-        return code, cost
-```
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ EXAMPLE 3: MATH WITH REVIEW-REVISE LOOP
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-```python
-import workspace.math.workflows.template.operator as operator
-from scripts.async_llm import create_llm_instance
-from scripts.evaluator import DatasetType
-
-class Workflow:
-    def __init__(self, name: str, llm_config, dataset: DatasetType):
-        self.name = name
-        self.dataset = dataset
-        self.model = create_llm_instance(llm_config)  # ✓ CORRECT: 'model'
-        self.answer_generate = operator.AnswerGenerate(self.model)
-        self.review = operator.Review(self.model)
-        self.revise = operator.Revise(self.model)  # ✓ All three initialized
-
-    async def __call__(self, problem: str, entry_point: str = None):
-        # Generate initial answer
-        result = await self.answer_generate(input=problem)
-        answer = result.get('answer', '') if isinstance(result, dict) else str(result)
-
-        # Review and potentially revise
-        review_result = await self.review(problem=problem, solution=answer)
-        if isinstance(review_result, dict) and not review_result.get('review_result', True):
-            feedback = review_result.get('feedback', '')
-            revise_result = await self.revise(problem=problem, solution=answer, feedback=feedback)
-            answer = revise_result.get('solution', answer) if isinstance(revise_result, dict) else str(revise_result)
-
-        cost = self.model.get_usage_summary()["total_cost"]
-        return answer, cost
-```
-
-🚫 COMMON MISTAKES - NEVER DO THESE:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-❌ MISTAKE 1: Wrong variable name
-   IMPORTANT: The LLM instance variable MUST be named 'model' (single token)
-   ✅ CORRECT:   self.model = create_llm_instance(llm_config)
-   ❌ WRONG:     self.llm = ...  (causes tokenizer issues)
-   ❌ WRONG:     self.language_model = ...
-
-❌ MISTAKE 2: Using undefined variables
-   if cond: code = ...
-   return code  # ❌ code undefined if cond is False!
-   → ✅ CORRECT:
-   code = None  # Initialize first!
-   if cond: code = ...
-   return code
-
-❌ MISTAKE 3: Calling .get() on non-dict (causes NoneType errors)
-   result = await operator()  # might return str!
-   value = result.get('key')  # ❌ AttributeError if result is str
-   → ✅ CORRECT:
-   value = result.get('key') if isinstance(result, dict) else result
-
-❌ MISTAKE 4: Confusing Review vs Revise operators
-   self.revise = operator.Revise(self.model)  # ❌ Revise not initialized
-   await self.revise(...)  # ❌ AttributeError: 'Workflow' has no 'revise'
-   → ✅ CORRECT:
-   # In __init__: Initialize what you use
-   self.review = operator.Review(self.model)  # ✓
-   # In __call__:
-   await self.review(problem=problem, solution=solution)  # ✓
-
-   # If you need Revise, initialize it too:
-   self.revise_op = operator.Revise(self.model)  # ✓ Different name
-   await self.revise_op(problem=problem, solution=sol, feedback=fb)  # ✓
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-"""
-
-        prompt = few_shot_example + f"""Now generate YOUR Workflow for the following problem.
-
-CRITICAL RULES:
-1. Use EXACT variable name: 'model' NOT 'llm', 'll_m', or 'language_model'
-2. Initialize ALL variables before if-blocks
-3. Always check isinstance(result, dict) before calling .get()
-4. __call__ signature: async def __call__(self, problem: str, entry_point: str = None)
-5. Always return (solution_string, cost_float) tuple
+CRITICAL for CODE problems:
+- Your __call__ method MUST accept THREE parameters: (problem: str, entry_point: str, test: str)
+- MUST use Programmer to generate code
+- MUST use Test to execute the code with test cases
+- MUST return the execution result, NOT the code string
 
 Available Operators:
 
-1. Custom(model) - Most flexible, for any custom task
-   Call: await self.custom(input=str, instruction=str)
-   Returns: {{'response': str}}
-
-2. AnswerGenerate(model) - Step-by-step reasoning
-   Call: await self.answer_generate(input=str)  ← NO instruction parameter!
-   Returns: {{'thought': str, 'answer': str}}
-
-3. Programmer(model) - Auto-generate and execute Python code
+1. Programmer(llm) - Auto-generate and execute Python code
    Call: await self.programmer(problem=str, analysis=str)
    Returns: {{'code': str, 'output': str}}
 
-4. Test(model) - Test code with test cases (uses entry_point to look up test cases automatically)
-   Call: await self.test(problem=str, solution=str, entry_point=str)  ← NO 'test' parameter!
+2. Test(llm) - Test code with test cases
+   Call: await self.test(problem=str, solution=str, entry_point=str)
    Returns: {{'result': bool, 'solution': str}}
 
-5. Review(model) - Review and validate solution
+3. Review(llm) - Review and validate solution
    Call: await self.review(problem=str, solution=str)
    Returns: {{'review_result': bool, 'feedback': str}}
 
-6. Revise(model) - Revise solution based on feedback
+Template:
+
+import workspace.{problem_type}.workflows.template.operator as operator
+from scripts.async_llm import create_llm_instance
+from scripts.evaluator import DatasetType
+
+class Workflow:
+    def __init__(self, name: str, llm_config, dataset: DatasetType):
+        self.name = name
+        self.dataset = dataset
+        self.llm = create_llm_instance(llm_config)
+        # Initialize Programmer and Test (required for code problems)
+        self.programmer = operator.Programmer(self.llm)
+        self.test = operator.Test(self.llm)
+
+    async def __call__(self, problem: str, entry_point: str, test: str):
+        # Solve: {problem}
+        # Generate code using Programmer
+        code_result = await self.programmer(problem=problem, analysis='')
+
+        # Test the code (this returns execution result, not code string)
+        test_result = await self.test(
+            problem=problem,
+            solution=code_result['code'],
+            entry_point=entry_point
+        )
+
+        # CRITICAL: Return execution result and cost
+        # test_result['solution'] contains the final code
+        # Return the execution output, not the code
+        return code_result['output'], self.llm.get_usage_summary()["total_cost"]
+"""
+            return prompt
+
+        # 通用模板（数学题和QA题）
+        prompt = f"""Generate a Python Workflow class to solve the given problem.
+
+IMPORTANT: Consider the problem's difficulty and complexity when designing your workflow.
+- Some problems are simple and straightforward
+- Some problems are complex and require careful handling
+- Choose your strategy based on what you observe about the problem
+
+CRITICAL RULES:
+- Only use operators listed below with their EXACT parameters
+- Initialize ALL variables before using them - never return undefined variables
+- If a variable is defined inside an if-block, either initialize it before the if-block OR handle both branches
+- Design your workflow freely - you decide which operators to use and how to combine them
+
+Available Operators:
+
+1. Custom(llm) - Most flexible, for any custom task
+   Call: await self.custom(input=str, instruction=str)
+   Returns: {{'response': str}}
+
+2. AnswerGenerate(llm) - Step-by-step reasoning
+   Call: await self.answer_generate(input=str)  ← NO instruction parameter!
+   Returns: {{'thought': str, 'answer': str}}
+
+3. Programmer(llm) - Auto-generate and execute Python code
+   Call: await self.programmer(problem=str, analysis=str)
+   Returns: {{'code': str, 'output': str}}
+
+4. Test(llm) - Test code with test cases
+   Call: await self.test(problem=str, solution=str, entry_point=str)
+   Returns: {{'result': bool, 'solution': str}}
+
+5. Review(llm) - Review and validate solution
+   Call: await self.review(problem=str, solution=str)
+   Returns: {{'review_result': bool, 'feedback': str}}
+
+6. Revise(llm) - Revise solution based on feedback
    Call: await self.revise(problem=str, solution=str, feedback=str)
    Returns: {{'solution': str}}
 
-7. ScEnsemble(model) - Self-consistency ensemble voting
+7. ScEnsemble(llm) - Self-consistency ensemble voting
    Call: await self.sc_ensemble(solutions=list, problem=str)
    Returns: {{'response': str}}
 
-"""
-
-        # L2.1: 添加问题类型特定的约束（方案B：软建议而非硬命令）
-        if problem_type == "qa":
-            problem_specific = """
-📋 RECOMMENDED: QA PROBLEMS (problem_type="qa")
-================================================================================
-⚠️  CONSTRAINTS (violation penalty: -5.0 reward):
-  ❌ Avoid Test operator - QA typically has no automated test cases
-     Using Test will likely cause NoneType errors (penalty: -5.0)
-  ❌ Avoid Programmer operator - QA is text-based, not code-related
-     Using Programmer is inefficient (penalty: -5.0)
-  ❌ Avoid entry_point parameter - QA problems don't have entry_point
-     Using entry_point will cause parameter errors (penalty: -5.0)
-
-✅ PREFERRED operators for QA:
-  ✅ Custom(model) - Most flexible for text-based tasks
-  ✅ AnswerGenerate(model) - Generate reasoning and answers (RECOMMENDED)
-  ✅ Review(model) - Validate answer quality
-  ✅ Revise(model) - Improve answers based on feedback
-  ✅ ScEnsemble(model) - Ensemble multiple candidates
-
-Example workflow structure for QA:
-  answer = await self.answer_generate(input=problem)
-  # ... optionally review and revise ...
-  return answer['answer'], cost
-
-Note: You can try other operators, but they will receive penalty in reward.
-================================================================================
-"""
-        elif problem_type == "code":
-            problem_specific = """
-✅ CRITICAL: CODE PROBLEMS (problem_type="code") - REQUIRE Test OPERATOR!
-================================================================================
-MUST use these operators with CODE problems:
-  ✅ Programmer(model) - Generate and improve Python code
-  ✅ Test(model) - Validate code with entry_point (CRITICAL!)
-
-Test operator MUST be used to verify code correctness:
-  - Test signature: await self.test(problem=str, solution=str, entry_point=str)
-  - entry_point is the function name you're implementing (e.g., "has_close_elements")
-  - Test operator finds test cases automatically using entry_point
-  - DO NOT pass 'test' parameter - Test finds it automatically!
-
-Example workflow for CODE:
-  code_result = await self.programmer(problem=problem, analysis='')
-  code = code_result['code']
-  test_result = await self.test(problem=problem, solution=code, entry_point=entry_point)
-  if test_result['result']:
-      return code, cost
-  else:
-      # Optionally revise based on test failure
-      ...
-
-CRITICAL: entry_point will NOT be None/empty for code problems!
-================================================================================
-"""
-        elif problem_type == "math":
-            problem_specific = """
-📊 RECOMMENDED: MATH PROBLEMS (problem_type="math")
-================================================================================
-⚠️  CONSTRAINTS (violation penalty: -5.0 reward):
-  ❌ Avoid Test operator - Math has no automated test cases
-     Using Test will cause NoneType errors (penalty: -5.0)
-  ❌ Avoid Programmer operator - Math is not code-related
-     Using Programmer is inefficient (penalty: -5.0)
-  ❌ Avoid entry_point parameter - Math problems don't have entry_point
-     Using entry_point will cause parameter errors (penalty: -5.0)
-
-✅ PREFERRED operators for MATH:
-  ✅ Custom(model) - Flexible mathematical reasoning
-  ✅ AnswerGenerate(model) - Step-by-step mathematical reasoning (RECOMMENDED)
-  ✅ Review(model) - Verify mathematical correctness
-  ✅ Revise(model) - Improve solution based on feedback
-
-Example workflow for MATH:
-  answer = await self.answer_generate(input=problem)
-  return answer['answer'], cost
-
-Note: You can try other operators, but they will receive penalty in reward.
-================================================================================
-"""
-        else:
-            problem_specific = ""
-
-        prompt += problem_specific + """
 Template (complete the __call__ method):
 
 import workspace.{problem_type}.workflows.template.operator as operator
@@ -390,34 +225,69 @@ class Workflow:
     def __init__(self, name: str, llm_config, dataset: DatasetType):
         self.name = name
         self.dataset = dataset
-        self.model = create_llm_instance(llm_config)
-        # Initialize operators you need (ONLY the ones you will use):
-        # self.custom = operator.Custom(self.model)
-        # self.answer_generate = operator.AnswerGenerate(self.model)
-        # self.programmer = operator.Programmer(self.model)
-        # self.test = operator.Test(self.model)
-        # self.review = operator.Review(self.model)
-        # self.revise = operator.Revise(self.model)
-        # self.sc_ensemble = operator.ScEnsemble(self.model)
+        self.llm = create_llm_instance(llm_config)
 
-    async def __call__(self, problem: str, entry_point: str = None):
+        # ⚠️ CRITICAL: Initialize ALL operators you will use in __call__!
+        # Example 1: If you only need answer_generate:
+        # self.answer_generate = operator.AnswerGenerate(self.llm)
+
+        # Example 2: If you need review:
+        # self.answer_generate = operator.AnswerGenerate(self.llm)
+        # self.review = operator.Review(self.llm)
+
+        # Example 3: Full workflow with programmer and test:
+        # self.programmer = operator.Programmer(self.llm)
+        # self.test = operator.Test(self.llm)
+        # self.review = operator.Review(self.llm)
+
+        # Available operators (initialize only what you need):
+        # self.custom = operator.Custom(self.llm)
+        # self.answer_generate = operator.AnswerGenerate(self.llm)
+        # self.programmer = operator.Programmer(self.llm)
+        # self.test = operator.Test(self.llm)
+        # self.review = operator.Review(self.llm)
+        # self.sc_ensemble = operator.ScEnsemble(self.llm)
+
+    async def __call__(self, problem: str):
         # Solve: {problem}
-        # MUST return (solution, cost) tuple
-        # Example: return solution['response'], self.model.get_usage_summary()["total_cost"]
-        # Note: entry_point is optional, used for code problems (ignored for other types)
-
-        # IMPORTANT: Initialize solution variable before any if-blocks!
-        # Good example:
-        #   solution = await self.answer_generate(input=problem)
-        #   answer = solution.get('answer', '')
-        #   if some_condition:
-        #       answer = improved_answer  # Modify existing variable
-        #   return answer, cost  # Always defined
+        # CRITICAL: MUST return (answer_string, cost_float) tuple
+        # - First value MUST be the final answer (string)
+        # - Second value MUST be the cost (float, from self.llm.get_usage_summary()["total_cost"])
         #
-        # Bad example (NEVER do this):
-        #   if some_condition:
-        #       answer = ...  # Only defined in if-block
-        #   return answer, cost  # ERROR: answer may be undefined!
+        # WRONG: NEVER return (code, answer) - this will cause type errors
+        # CORRECT: ALWAYS return (answer, cost)
+
+        # Example 1 - Simple workflow:
+        # solution = await self.answer_generate(input=problem)
+        # return solution['answer'], self.llm.get_usage_summary()["total_cost"]
+
+        # Example 2 - Review loop:
+        # solution = await self.answer_generate(input=problem)
+        # review = await self.review(problem=problem, solution=solution['answer'])
+        # if not review['review_result']:
+        #     # Regenerate or use feedback to guide next attempt
+        #     solution = await self.answer_generate(input=problem + "\n" + review['feedback'])
+        # return solution['answer'], self.llm.get_usage_summary()["total_cost"]
+
+        # Example 3 - Code problem workflow:
+        # code_result = await self.programmer(problem=problem, analysis='None')
+        # test_result = await self.test(problem=problem, solution=code_result['code'], entry_point='solution')
+        # if test_result['result']:
+        #     return test_result['solution'], self.llm.get_usage_summary()["total_cost"]
+        # return code_result['output'], self.llm.get_usage_summary()["total_cost"]
+
+        # IMPORTANT: Always initialize variables before any if-blocks!
+        # Good:
+        #   answer = await self.answer_generate(input=problem)
+        #   final = answer['answer']  # Initialize
+        #   if condition:
+        #       final = modified  # Modify
+        #   return final, cost  # Always defined
+        #
+        # Bad (NEVER):
+        #   if condition:
+        #       answer = ...  # Only in if-block
+        #   return answer, cost  # ERROR if condition is False!
 
         pass
 """
@@ -533,58 +403,89 @@ class Workflow:
         # 去除首尾空白
         code = code.strip()
 
-        # ===== 增强的语法和拼写验证 =====
-        # Step 1: AST语法验证
+        # ⚠️ 方案1：自动修复缺失的operator初始化
+        code = self._validate_and_fix_workflow(code, problem_type)
+
+        # 验证语法
         try:
-            tree = ast.parse(code)
+            ast.parse(code)
             is_valid = True
             error = None
         except SyntaxError as e:
             is_valid = False
             error = f"Syntax error: {str(e)}"
-            print(f"⚠️  语法错误: {error}")
-            return self._get_default_workflow(problem_type), False, error
-
-        # Step 2: 变量名检查（确保使用'model'而非'llm'）
-        # 由于tokenizer将'llm'分为['ll', 'm']两个token，导致生成'll_m'错误
-        # 解决方案：强制使用'model'（单token）
-        typo_patterns = [
-            ('self.llm', 'self.model'),  # 检测旧的self.llm并修复
-            ('.llm', '.model'),           # 检测任何.llm并修复
-        ]
-
-        found_typos = []
-        for typo, correct in typo_patterns:
-            # 使用正则避免匹配llm_config
-            import re
-            pattern = re.escape(typo) + r'(?![a-z_])'  # 确保后面不是字母或下划线
-            if re.search(pattern, code):
-                found_typos.append(f"{typo} (should be {correct})")
-
-        if found_typos:
-            error = f"Variable name issues detected: {', '.join(found_typos)}"
-            print(f"⚠️  变量名问题: {error}")
-            # 自动修复：将self.llm替换为self.model
-            for typo, correct in typo_patterns:
-                pattern = re.escape(typo) + r'(?![a-z_])'
-                code = re.sub(pattern, correct, code)
-            print(f"✅ 已自动修复变量名（llm→model）")
-            error = None
-
-        # Step 3: 检查是否定义了必要的方法
-        if 'async def __call__' not in code:
-            is_valid = False
-            error = "Missing '__call__' method"
-            print(f"⚠️  缺少__call__方法: {error}")
-            return self._get_default_workflow(problem_type), False, error
-
-        if 'def __init__' not in code:
-            is_valid = False
-            error = "Missing '__init__' method"
-            print(f"⚠️  缺少__init__方法: {error}")
-            return self._get_default_workflow(problem_type), False, error
+            # 返回默认工作流
+            code = self._get_default_workflow(problem_type)
 
         return code, is_valid, error
+
+    def _validate_and_fix_workflow(self, code: str, problem_type: str) -> str:
+        """验证并自动修复workflow中缺失的operator初始化
+
+        Args:
+            code: 生成的workflow代码
+            problem_type: 问题类型
+
+        Returns:
+            修复后的代码
+        """
+        import re
+
+        # 1. 提取__init__中已初始化的operators
+        initialized_ops = set()
+        init_section = re.search(r'def __init__\([^)]+\):[\s\S]+?(?=\n    async def|\n    def|$)', code)
+        if init_section:
+            init_code = init_section.group(0)
+            # 匹配 self.xxx = operator.XXX(self.llm)
+            init_patterns = re.findall(r'self\.(\w+)\s*=\s*operator\.(\w+)\(', init_code)
+            for attr_name, op_name in init_patterns:
+                initialized_ops.add(attr_name)
+
+        # 2. 提取__call__中使用的operators
+        used_ops = set()
+        call_section = re.search(r'async def __call__\([^)]+\):[\s\S]+', code)
+        if call_section:
+            call_code = call_section.group(0)
+            # 匹配 await self.xxx(...)
+            used_patterns = re.findall(r'await self\.(\w+)\(', call_code)
+            for op_name in used_patterns:
+                used_ops.add(op_name)
+
+        # 3. 找出缺失的operators
+        missing_ops = used_ops - initialized_ops
+
+        if missing_ops:
+            print(f"\n⚠️  检测到缺失的operator初始化: {missing_ops}")
+            print(f"   已初始化: {initialized_ops}")
+            print(f"   已使用: {used_ops}")
+
+            # 4. 自动添加缺失的初始化代码
+            # 找到 self.llm = create_llm_instance(...) 的位置
+            llm_init_match = re.search(r'(\s+)(self\.llm = create_llm_instance\([^)]+\))', code)
+            if llm_init_match:
+                indent = llm_init_match.group(1)
+                llm_init_line = llm_init_match.group(2)
+
+                # 构建缺失的初始化代码
+                missing_inits = []
+                for op_name in sorted(missing_ops):
+                    # 推断operator类名（首字母大写+驼峰命名）
+                    # answer_generate -> AnswerGenerate
+                    # review -> Review
+                    op_class_name = ''.join(word.capitalize() for word in op_name.split('_'))
+
+                    # 检查是否是有效的operator（从prompt中获取）
+                    valid_operators = ['Custom', 'AnswerGenerate', 'Programmer', 'Test', 'Review', 'Revise', 'ScEnsemble']
+                    if op_class_name in valid_operators:
+                        missing_inits.append(f"{indent}self.{op_name} = operator.{op_class_name}(self.llm)")
+
+                if missing_inits:
+                    # 在 self.llm = ... 之后插入
+                    insert_code = '\n' + '\n'.join(missing_inits)
+                    code = code.replace(llm_init_line, llm_init_line + insert_code)
+                    print(f"✅ 自动添加了 {len(missing_inits)} 个缺失的operator初始化")
+
+        return code
 
     def _get_default_workflow(self, problem_type: str = "math") -> str:
         """默认工作流（当生成失败时）"""
@@ -596,14 +497,12 @@ class Workflow:
     def __init__(self, name: str, llm_config, dataset: DatasetType):
         self.name = name
         self.dataset = dataset
-        self.model = create_llm_instance(llm_config)
-        self.custom = operator.Custom(self.model)
+        self.llm = create_llm_instance(llm_config)
+        self.custom = operator.Custom(self.llm)
 
-    async def __call__(self, problem: str, entry_point: str = None):
-        # entry_point is optional, used for code problems
+    async def __call__(self, problem: str):
         solution = await self.custom(input=problem, instruction="Solve this problem step by step.")
-        response = solution.get('response', '') if isinstance(solution, dict) else str(solution)
-        return response, self.model.get_usage_summary()["total_cost"]
+        return solution['response'], self.llm.get_usage_summary()["total_cost"]
 """
 
 
@@ -617,7 +516,7 @@ def test_generator():
     generator = RLWorkflowGenerator(
         base_model="Qwen/Qwen2.5-7B-Instruct",
         device_ids=[2, 3],
-        operator_descriptions_path=os.path.join(os.getenv("AFLOW_PATH", "./AFlow"), "workspace/MATH/workflows/template/operator.json")
+        operator_descriptions_path="/home/yijia/.claude/11/AFlow/workspace/MATH/workflows/template/operator.json"
     )
 
     # 测试问题
