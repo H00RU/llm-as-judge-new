@@ -65,7 +65,11 @@ class DataManager:
         # 应用字段映射规则
         mapped_sample = {}
         for src_field, dst_field in self.FIELD_MAPPING.items():
-            mapped_sample[dst_field] = sample.get(src_field, "")
+            value = sample.get(src_field, "")
+            # 特殊处理：始终使用domain字段的值，忽略problem_type
+            if src_field == "domain":
+                value = sample.get("domain", "")
+            mapped_sample[dst_field] = value
 
         # 保留其他必要字段
         mapped_sample["id"] = sample.get("id", "")

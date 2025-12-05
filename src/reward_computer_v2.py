@@ -174,25 +174,37 @@ class RewardComputer:
         else:
             base_tier = self._compute_qa_reward(pred_extracted, gt_extracted)
 
-        # Step 3: Apply execution penalties
-        execution_penalty = 0.0
-        penalty_reason = ""
+        # Step 3: Apply structure correctness rewards and penalties
+        structure_adjustment = 0.0
+        structure_reason = ""
 
-        if not execution_metadata.get('success', True):
-            error_type = execution_metadata.get('error_type', 'unknown')
+        # 3.1: Check for validation failures
+        if execution_metadata.get('validation_failed', False):
+            structure_adjustment -= 0.3
+            structure_reason += "Validation failed; "
 
-            if error_type == 'operator_mismatch':
-                execution_penalty = -0.4
-                penalty_reason = "Operator-problem type mismatch"
-            elif error_type == 'validation_failed':
-                execution_penalty = -0.2
-                penalty_reason = "Validation/syntax error"
-            else:
-                execution_penalty = -0.3
-                penalty_reason = f"Execution error: {error_type}"
+        # 3.2: Check for operator-problem type mismatches (critical!)
+        if execution_metadata.get('operator_problem_type_mismatch', False):
+            mismatch_type = execution_metadata.get('mismatch_type', 'unknown')
+            structure_adjustment -= 0.5  # Heavy penalty for using wrong operators
+            structure_reason += f"Operator mismatch ({mismatch_type}); "
+
+        # 3.3: Check for fallback usage (indicates generation failure)
+        if execution_metadata.get('needed_fallback', False):
+            fallback_type = execution_metadata.get('fallback_type', 'unknown')
+            structure_adjustment -= 0.4
+            structure_reason += f"Fallback used ({fallback_type}); "
+
+        # 3.4: Reward proper workflow structure
+        # If no structural issues, give a small bonus
+        if not execution_metadata.get('validation_failed', False) and \
+           not execution_metadata.get('operator_problem_type_mismatch', False) and \
+           not execution_metadata.get('needed_fallback', False):
+            structure_adjustment += 0.1
+            structure_reason = "Perfect workflow structure; "
 
         # Step 4: Compute final reward (ensure stays in tier boundaries)
-        final_reward = max(0.0, base_tier + execution_penalty)
+        final_reward = max(0.0, base_tier + structure_adjustment)
 
         # Snap to nearest tier
         tier_levels = [0.0, 0.2, 0.4, 0.7, 1.0]
@@ -205,10 +217,13 @@ class RewardComputer:
             'tier': tier_index + 1,  # 1-5
             'breakdown': {
                 'base_tier': base_tier,
-                'execution_penalty': execution_penalty,
+                'structure_adjustment': structure_adjustment,
                 'final_reward': final_reward,
-                'penalty_reason': penalty_reason,
-                'problem_type': problem_type
+                'structure_reason': structure_reason.strip(),
+                'problem_type': problem_type,
+                'validation_failed': execution_metadata.get('validation_failed', False),
+                'operator_mismatch': execution_metadata.get('operator_problem_type_mismatch', False),
+                'needed_fallback': execution_metadata.get('needed_fallback', False)
             }
         }
 

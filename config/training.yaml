@@ -15,8 +15,8 @@ use_gradient_checkpointing: true  # ✅ FUNDAMENTAL FIX: Enable gradient checkpo
 # ============================================
 # ✨ PHASE 3 OPTIMIZATION: Reduced K, optimized KL and gradient accumulation
 max_steps: 500
-rollout_batch_size: 5                 # ✨ Increased from 4 to 5 (5 samples per batch)
-num_return_sequences_in_group: 2      # ✨ PHASE 3: Changed 6→2 (Total: 5×2=10 workflows, reduced from 24)
+rollout_batch_size: 4                 # ✨ 4 samples per batch
+num_return_sequences_in_group: 4      # ✨ 4 workflows per sample (Total: 4×4=16 workflows per step)
 
 # Learning & Optimization - ✨ OPTIMIZED
 learning_rate: 2.0e-5
@@ -42,7 +42,7 @@ temperature_schedule:
 # 生成配置（备用，当temperature_schedule.enabled=false时使用）
 generation_config:
   temperature: 0.2
-  max_tokens: 4096            # ✅ Prevent truncation
+  max_tokens: 8192            # ⬆️ OPTIMIZED: 4096→8192 (Double context, GPU RAM available)
   top_p: 0.95
   top_k: 50
 
@@ -50,8 +50,8 @@ generation_config:
 # LoRA Configuration
 # ============================================
 use_lora: true
-lora_rank: 64          # ✅ 恢复到64（用户要求）
-lora_alpha: 64         # ✅ 恢复到64（维持 alpha/rank = 1.0 比例）
+lora_rank: 128         # ⬆️ OPTIMIZED: 64→128 (Double LoRA expressiveness, GPU RAM available)
+lora_alpha: 128        # ⬆️ OPTIMIZED: 64→128 (Maintain alpha/rank = 1.0 ratio for scaling)
 lora_dropout: 0.05     # ✅ 改为0.05（参考reference）
 lora_target_modules: "q_proj,k_proj,v_proj,o_proj"  # ✅ 更新为reference的target modules
 
@@ -121,13 +121,13 @@ operator_prompt_enhancer:
 wandb:
   enabled: true
   project: "aflow-roll-integration"
-  run_name: "grpo-500steps-4batch-6workflows-reference-restored"
+  run_name: "grpo-500steps-4batch-4workflows-per-sample"
   # api_key从环境变量读取: WANDB_API_KEY
 
 # ============================================
 # 训练说明 - ✨ PHASE 5 ROOT CAUSE FIX (根本性修复)
 # ============================================
-# 总样本数：500 steps × 5 batch × 2 workflows = 5,000 个工作流生成和执行
+# 总样本数：500 steps × 4 batch × 4 workflows = 8,000 个工作流生成和执行
 #
 # ✨ ROOT CAUSE修复 (Phase 5 - 基于参考项目/content/llm-as-judge)：
 # 1. **移除错误的tensor删除** (_compute_log_prob_trainable):
@@ -149,24 +149,34 @@ wandb:
 # 10. Experience buffer阈值：0.4（early training）
 #
 # 训练流程：
-# 1. 采样：batch_size=5，从mixed数据集（math:qa:code=4:3:3）均衡采样
-# 2. 生成：每个sample生成2个workflow（GRPO组，总10个/step）
+# 1. 采样：batch_size=4，从mixed数据集（math:qa:code=4:3:3）均衡采样
+# 2. 生成：每个sample生成4个workflow（GRPO组，总16个/step）
 # 3. 执行：AFlow执行器运行workflows，超时180秒
 # 4. 奖励：RewardComputer v2计算5-tier奖励 [0.0, 0.2, 0.4, 0.7, 1.0]
 # 5. 更新：GRPO优化器使用低KL系数更新LoRA权重
 # 6. 验证：每5步记录指标，每20步保存checkpoint
 #
-# ✨ 关键配置（Phase 3优化）：
-# ✨ max_steps: 500（保持）
-# ✨ rollout_batch_size: 5（改from 4）
-# ✨ num_return_sequences_in_group: 2（改from 6，减少并发）
-# ✨ kl_loss_coef: 0.005（改from 0.1，允许更大的策略学习）
-# ✨ gradient_accumulation_steps: 4（改from 1）
-# ✨ temperature_schedule.enabled: true（改from false）
+# ✨ 关键配置：
+# ✨ max_steps: 500
+# ✨ rollout_batch_size: 4
+# ✨ num_return_sequences_in_group: 4（每个sample生成4个workflow）
+# ✨ kl_loss_coef: 0.02（稳定策略更新）
+# ✨ gradient_accumulation_steps: 4
+# ✨ temperature_schedule.enabled: true
 # ✨ temperature_schedule: 0.5→0.15 over 150 steps
-# ✨ experience_buffer.reward_threshold: 0.7（改from 8.0，5-tier系统）
+# ✨ experience_buffer.reward_threshold: 0.4（5-tier系统）
 # ✅ learning_rate: 2.0e-5（保持）
 # ✅ warmup_steps: 100（保持）
-# ✅ lora_rank: 64（保持）
-# ✅ max_tokens: 4096（保持）
+# ⬆️ lora_rank: 64→128（GPU RAM优化）
+# ⬆️ max_tokens: 4096→8192（GPU RAM优化）
 # ✅ domain_ratios: math 40%, qa 30%, code 30%（保持均衡采样）
+#
+# ⚡ GPU优化说明：
+# • max_tokens: 4096→8192 → 允许生成更长的workflow代码，更好的context
+# • lora_rank: 64→128 → LoRA参数增加4倍，微调能力更强
+# • GPU内存预计：20GB→28-32GB（在40GB内仍有余量）
+#
+# 如需进一步优化（GPU还有余量），可考虑：
+# • num_return_sequences_in_group: 4→6 (需+8GB)
+# • rollout_batch_size: 4→5 或 4→6 (需大量VRAM，不推荐)
+# • gradient_accumulation_steps: 4→2 (加快训练但可能不稳定)

@@ -13,11 +13,11 @@ import time
 
 # 导入工作流验证器、响应标准化器和SymPy修复器
 try:
-    from .workflow_validator import WorkflowValidator
+    from .workflow_validator_v2 import WorkflowValidatorV2
     from .response_standardizer import ResponseStandardizer
     from .sympy_code_fixer import SymPyCodeFixer
 except ImportError:
-    from workflow_validator import WorkflowValidator
+    from workflow_validator_v2 import WorkflowValidatorV2
     from response_standardizer import ResponseStandardizer
     from sympy_code_fixer import SymPyCodeFixer
 
@@ -190,9 +190,9 @@ class AFlowExecutor:
         self.timeout = timeout
         self.operator_enhancer = operator_enhancer
         self.enable_fallback = enable_fallback
-        self.validator = WorkflowValidator()  # 添加验证器
-        self.standardizer = ResponseStandardizer()  # 添加响应标准化器
-        self.sympy_fixer = SymPyCodeFixer()  # 添加SymPy修复器
+        self.validator_v2 = WorkflowValidatorV2()  # 统一验证器（支持reactive patching + TASK_PROMPT提取）
+        self.standardizer = ResponseStandardizer()  # 响应标准化器
+        self.sympy_fixer = SymPyCodeFixer()  # SymPy修复器
 
         # 加载LLM配置
         self._load_llm_config()
@@ -465,25 +465,22 @@ class AFlowExecutor:
             # 不raise异常 - 继续执行workflow，稍后在metadata中标记
 
         # 1. 验证工作流代码
-        # 综合方案：一步完成验证和修复（包括关键的签名修复和operator初始化修复）
+        # 使用WorkflowValidatorV2进行reactive patching验证和修复
         print(f"  1️⃣ 验证和修复工作流代码...")
-        workflow_code, is_valid, msg, fixes_applied, had_signature_error, had_uninitialized_operators = \
-            self.validator.validate_and_fix_workflow(workflow_code, problem_type)
+        fixed_code, is_valid, error_msg, fixes_applied = \
+            self.validator_v2.validate_and_fix_workflow(workflow_code, problem_type)
+
+        workflow_code = fixed_code
 
         # 记录修复和错误到元数据（给GRPO学习）
         metadata = kwargs.get('metadata', {})
         if fixes_applied:
             metadata['auto_fixes_applied'] = fixes_applied
-        if had_signature_error:
-            metadata['had_signature_error'] = True
-            print(f"  ⚠️  检测到签名错误（已自动修复）")
-        if had_uninitialized_operators:
-            metadata['had_uninitialized_operators'] = True
-            print(f"  ⚠️  检测到未初始化operators（已自动修复）")
+            print(f"  ✅ 应用了以下修复: {fixes_applied}")
 
         if not is_valid:
             # 修复后仍然无效，才考虑降级
-            print(f"  ⚠️  工作流代码修复后仍然无效: {msg}")
+            print(f"  ⚠️  工作流代码修复后仍然无效: {error_msg}")
 
             if self.enable_fallback:
                 print(f"  使用Fallback工作流")
@@ -545,37 +542,76 @@ class AFlowExecutor:
                 metadata['had_instantiation_error'] = True
 
             # 执行（带超时）
-            # For code problems, try passing entry_point (NOT test - Test operator finds test cases automatically)
+            # 根本性修复：智能3级参数降级策略（参考项目方案）
             try:
                 if problem_type == "code":
-                    # Try with entry_point first
-                    if "entry_point" in kwargs:
+                    # 策略1: 尝试传入所有3个参数 (problem, entry_point, test)
+                    if "entry_point" in kwargs and "test" in kwargs:
                         try:
+                            print(f"  📋 尝试3参数模式: (problem, entry_point, test)")
+                            result = await asyncio.wait_for(
+                                workflow(problem, kwargs["entry_point"], kwargs["test"]),
+                                timeout=self.timeout
+                            )
+                            print(f"  ✅ 3参数模式成功")
+                        except TypeError as e:
+                            # 策略2: 降级到2参数 (problem, entry_point)
+                            if "positional argument" in str(e) or "missing" in str(e).lower():
+                                print(f"  ⚠️  3参数失败，尝试2参数模式: (problem, entry_point)")
+                                try:
+                                    result = await asyncio.wait_for(
+                                        workflow(problem, kwargs["entry_point"]),
+                                        timeout=self.timeout
+                                    )
+                                    print(f"  ✅ 2参数模式成功")
+                                except TypeError as e2:
+                                    # 策略3: 降级到1参数 (problem only)
+                                    if "positional argument" in str(e2) or "missing" in str(e2).lower():
+                                        print(f"  ⚠️  2参数失败，降级到1参数模式: (problem)")
+                                        result = await asyncio.wait_for(
+                                            workflow(problem),
+                                            timeout=self.timeout
+                                        )
+                                        print(f"  ✅ 1参数模式成功")
+                                    else:
+                                        raise
+                            else:
+                                raise
+                    elif "entry_point" in kwargs:
+                        # 只有entry_point，没有test
+                        try:
+                            print(f"  📋 尝试2参数模式: (problem, entry_point)")
                             result = await asyncio.wait_for(
                                 workflow(problem, kwargs["entry_point"]),
                                 timeout=self.timeout
                             )
+                            print(f"  ✅ 2参数模式成功")
                         except TypeError as e:
-                            if "positional argument" in str(e):
-                                print(f"  ⚠️  Workflow不支持entry_point参数，降级为只传problem")
+                            if "positional argument" in str(e) or "missing" in str(e).lower():
+                                print(f"  ⚠️  2参数失败，降级到1参数模式: (problem)")
                                 result = await asyncio.wait_for(
                                     workflow(problem),
                                     timeout=self.timeout
                                 )
+                                print(f"  ✅ 1参数模式成功")
                             else:
                                 raise
                     else:
-                        # No entry_point available
+                        # 没有entry_point，直接用1参数
+                        print(f"  📋 使用1参数模式: (problem)")
                         result = await asyncio.wait_for(
                             workflow(problem),
                             timeout=self.timeout
                         )
+                        print(f"  ✅ 1参数模式成功")
                 else:
-                    # Non-code problems
+                    # Non-code problems (Math/QA) - 仅传problem参数
+                    print(f"  📋 {problem_type.upper()}问题使用1参数模式: (problem)")
                     result = await asyncio.wait_for(
                         workflow(problem),
                         timeout=self.timeout
                     )
+                    print(f"  ✅ 执行成功")
             except Exception as e:
                 # 捕获所有异常（operator执行失败）
                 print(f"  ❌ Workflow执行异常: {type(e).__name__}")
@@ -756,7 +792,19 @@ class AFlowExecutor:
             return None, 0.0, metadata
 
     def _create_workflow_class(self, workflow_code: str, problem_type: str):
-        """从工作流代码动态创建Workflow类"""
+        """
+        从工作流代码动态创建Workflow类，支持TASK_PROMPT注入
+
+        设计：
+        1. 提取TASK_PROMPT变量（如果存在）
+        2. 创建基础工作流类
+        3. 如果有TASK_PROMPT，创建EnhancedWorkflow包装器自动注入
+        """
+
+        # 1. 提取TASK_PROMPT（可选）
+        task_prompt = self.validator_v2.extract_task_prompt(workflow_code)
+        if task_prompt:
+            print(f"📝 检测到TASK_PROMPT，将在执行时注入")
 
         # 准备命名空间
         namespace = {
@@ -777,18 +825,48 @@ class AFlowExecutor:
         modified_code = modified_code.replace("create_lll_instance", "create_llm_instance")
 
         try:
-            # 执行代码创建类
+            # 2. 执行代码创建基础类
             exec(modified_code, namespace)
 
             # 返回Workflow类
             if "Workflow" not in namespace:
                 raise ValueError("No Workflow class found in generated code")
 
-            return namespace["Workflow"]
+            base_class = namespace["Workflow"]
+
+            # 3. 如果有TASK_PROMPT，创建EnhancedWorkflow包装器
+            if task_prompt:
+                class EnhancedWorkflow:
+                    """自动注入TASK_PROMPT的包装器"""
+                    def __init__(self, name: str, llm_config, dataset):
+                        self.base_workflow = base_class(name, llm_config, dataset)
+                        self.task_prompt = task_prompt
+                        self.llm = self.base_workflow.llm
+
+                    async def __call__(self, problem: str, *args, **kwargs):
+                        """
+                        自动在问题前注入TASK_PROMPT
+
+                        Args:
+                            problem: 原始问题文本
+                            *args, **kwargs: 传递给基础工作流的其他参数（如entry_point, test）
+
+                        Returns:
+                            (answer, cost) 元组
+                        """
+                        # 注入TASK_PROMPT到问题前面
+                        enhanced_problem = f"{self.task_prompt}\n\n{problem}"
+                        return await self.base_workflow(enhanced_problem, *args, **kwargs)
+
+                return EnhancedWorkflow
+            else:
+                return base_class
 
         except Exception as e:
             print(f"⚠️  生成的工作流代码有错误: {e}")
             print(f"  使用默认fallback工作流")
+            import traceback
+            traceback.print_exc()
 
             # 使用简单的默认工作流作为fallback
             return self._get_fallback_workflow_class(problem_type)

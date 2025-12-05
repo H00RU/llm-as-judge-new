@@ -158,9 +158,9 @@ Operator Validation (operator names, parameters)
 
 | Config | Old | New | Reason |
 |--------|-----|-----|--------|
-| K (sequences per sample) | 6 | 2 | ↓ Concurrency, ↓ timeouts |
-| B (batch size) | 4 | 5 | ↑ Sample diversity |
-| KL coefficient | 0.1 | 0.005 | ↑ Policy learning speed |
+| K (sequences per sample) | 6 | 4 | 更多workflows提高质量 |
+| B (batch size) | 5 | 4 | 平衡样本多样性 |
+| KL coefficient | 0.1 | 0.02 | 稳定策略更新 |
 | Gradient accumulation | 1 | 4 | ↓ OOM, ↓ variance |
 | Temperature schedule | Disabled | Enabled (0.5→0.15) | Better exploration-exploitation |
 
@@ -263,7 +263,7 @@ Metrics Report
 
 ### Phase 3: Training Configuration
 - **Before**: K=6, B=4, KL=0.1 → 24 concurrent, high timeout, slow learning
-- **After**: K=2, B=5, KL=0.005 → 10 concurrent, stable, fast convergence
+- **Current**: K=4, B=4, KL=0.02 → 16 concurrent, balanced quality and efficiency
 
 ### Phase 4: Code Generation Enhancement
 - **Before**: Poor quality generation, many failed workflows
