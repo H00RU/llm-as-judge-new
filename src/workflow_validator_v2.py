@@ -106,7 +106,7 @@ class WorkflowValidatorV2:
         consistency = self._check_consistency(code)
 
         if not consistency['consistent']:
-            # Reactively patch issues
+            # Reactively patch issues（会自动修复但标记）
             code, patched = self._patch_consistency_issues(code, consistency)
             if patched:
                 fixes.extend(patched)
@@ -307,24 +307,29 @@ class WorkflowValidatorV2:
         consistency: Dict
     ) -> Tuple[str, List[str]]:
         """
-        Reactively patch missing imports and initializations
+        Reactively patch missing imports and initializations（保留修复功能）
 
-        This is the CORE of patch mode - only fix what's broken
+        修改理由：不直接移除auto-fix，而是标记后通过reward惩罚
+        策略：保留修复确保训练稳定性，但标记auto-fix使用以降低reward上限
+
+        关键：auto-fix会被标记 → reward中降低cap → Qwen有动力学习正确生成
         """
         fixes = []
 
-        # Patch 1: Add missing imports
+        # ✅ 保留：自动添加imports（但会标记）
         if consistency['missing_imports']:
             code = self._add_missing_imports(code, consistency['missing_imports'])
-            fixes.append(f"added_imports_{len(consistency['missing_imports'])}")
+            fixes.append(f"auto_fixed_imports_{len(consistency['missing_imports'])}")
+            # 关键：标记为auto_fixed而非added，用于reward识别
 
-        # Patch 2: Add missing initializations
+        # ✅ 保留：自动添加initializations（但会标记）
         if consistency['missing_initializations']:
             code = self._add_missing_initializations(
                 code,
                 consistency['missing_initializations']
             )
-            fixes.append(f"added_inits_{len(consistency['missing_initializations'])}")
+            fixes.append(f"auto_fixed_inits_{len(consistency['missing_initializations'])}")
+            # 关键：标记为auto_fixed而非added，用于reward识别
 
         return code, fixes
 

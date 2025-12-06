@@ -478,6 +478,9 @@ class AFlowExecutor:
             metadata['auto_fixes_applied'] = fixes_applied
             print(f"  ✅ 应用了以下修复: {fixes_applied}")
 
+        # 🆕 初始化参数降级计数器（Priority 2.1）
+        signature_downgrade_count = 0
+
         if not is_valid:
             # 修复后仍然无效，才考虑降级
             print(f"  ⚠️  工作流代码修复后仍然无效: {error_msg}")
@@ -557,6 +560,7 @@ class AFlowExecutor:
                         except TypeError as e:
                             # 策略2: 降级到2参数 (problem, entry_point)
                             if "positional argument" in str(e) or "missing" in str(e).lower():
+                                signature_downgrade_count += 1  # 🆕 记录降级
                                 print(f"  ⚠️  3参数失败，尝试2参数模式: (problem, entry_point)")
                                 try:
                                     result = await asyncio.wait_for(
@@ -567,6 +571,7 @@ class AFlowExecutor:
                                 except TypeError as e2:
                                     # 策略3: 降级到1参数 (problem only)
                                     if "positional argument" in str(e2) or "missing" in str(e2).lower():
+                                        signature_downgrade_count += 1  # 🆕 记录降级
                                         print(f"  ⚠️  2参数失败，降级到1参数模式: (problem)")
                                         result = await asyncio.wait_for(
                                             workflow(problem),
@@ -588,6 +593,7 @@ class AFlowExecutor:
                             print(f"  ✅ 2参数模式成功")
                         except TypeError as e:
                             if "positional argument" in str(e) or "missing" in str(e).lower():
+                                signature_downgrade_count += 1  # 🆕 记录降级
                                 print(f"  ⚠️  2参数失败，降级到1参数模式: (problem)")
                                 result = await asyncio.wait_for(
                                     workflow(problem),
@@ -739,7 +745,8 @@ class AFlowExecutor:
                     "fallback_executed": False,
                     # 新增（方案B）：标记operator-problem type匹配情况
                     "operator_problem_type_mismatch": mismatch_detected,
-                    "mismatch_type": mismatch_details.split('\n')[0] if mismatch_details else None
+                    "mismatch_type": mismatch_details.split('\n')[0] if mismatch_details else None,
+                    "signature_downgrade_count": signature_downgrade_count  # 🆕 添加降级计数
                 })
             else:
                 # 实例化失败但最终成功的流程：保留had_instantiation_error，添加needed_fallback
@@ -749,6 +756,7 @@ class AFlowExecutor:
                 metadata['execution_time'] = execution_time
                 metadata['operator_problem_type_mismatch'] = mismatch_detected
                 metadata['mismatch_type'] = mismatch_details.split('\n')[0] if mismatch_details else None
+                metadata['signature_downgrade_count'] = signature_downgrade_count  # 🆕 添加降级计数
 
             if mismatch_detected:
                 print(f"  ⚠️  Workflow violates operator-problem constraint")
@@ -767,7 +775,8 @@ class AFlowExecutor:
                 "cost": 0.0,
                 "problem_type": problem_type,
                 "validation_failed": False,  # 🔴 新增：工作流通过验证，但执行超时了
-                "fallback_executed": False
+                "fallback_executed": False,
+                "signature_downgrade_count": signature_downgrade_count  # 🆕 添加降级计数
             }
 
             return None, 0.0, metadata
@@ -786,7 +795,8 @@ class AFlowExecutor:
                 "cost": 0.0,
                 "problem_type": problem_type,
                 "validation_failed": False,  # 🔴 新增：工作流通过验证，但执行失败了
-                "fallback_executed": False
+                "fallback_executed": False,
+                "signature_downgrade_count": signature_downgrade_count  # 🆕 添加降级计数
             }
 
             return None, 0.0, metadata

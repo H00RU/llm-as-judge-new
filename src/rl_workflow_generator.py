@@ -162,6 +162,41 @@ CONSEQUENCES OF VIOLATION:
 - Not using Test → No testing → 0 reward
 - Returning wrong format → Type error → execution fails
 
+╔══════════════════════════════════════════════════════════════╗
+║  🎯 CRITICAL: Complete Code Structure Required              ║
+╚══════════════════════════════════════════════════════════════╝
+
+Your generated code MUST include ALL of these sections:
+
+1️⃣ IMPORTS (at the top):
+   from scripts.operators import Programmer, Test, Review
+   # Add ONLY the operators you will actually use in __call__
+   # RULE: Every operator used → must be imported
+
+2️⃣ CLASS DEFINITION:
+   class Workflow:
+
+3️⃣ INITIALIZATION (__init__ method):
+   def __init__(self, name: str, llm_config, dataset: DatasetType):
+       self.llm = create_llm_instance(llm_config)
+       # Initialize EVERY operator you import
+       # If you import Programmer, you MUST have: self.programmer = Programmer(self.llm)
+       # If you import Test, you MUST have: self.test = Test(self.llm)
+       # RULE: Every import → must be initialized
+
+4️⃣ CALL METHOD:
+   async def __call__(self, problem: str, entry_point: str, test: str):
+       # Your workflow logic using initialized operators
+       return answer, cost
+
+⚠️ VALIDATION RULES (causes reward=0.0 if violated):
+- Every operator used in __call__ MUST be imported
+- Every operator imported MUST be initialized in __init__
+- Imports and initializations MUST match exactly
+- Example: If you use self.review(...), you need:
+  ✓ Import: from scripts.operators import Review
+  ✓ Init: self.review = Review(self.llm)
+
 CODE PROBLEM WORKFLOW STRUCTURE:
 ```python
 from scripts.operators import Custom, AnswerGenerate, Programmer, Test, Review, Revise, ScEnsemble
@@ -289,6 +324,61 @@ REMEMBER:
 - EVERY operator must match the problem type
 - Violating constraints is the #1 cause of failure
 
+╔══════════════════════════════════════════════════════════════╗
+║  🎯 CRITICAL: Complete Code Structure Required              ║
+╚══════════════════════════════════════════════════════════════╝
+
+Your generated code MUST include ALL of these sections:
+
+1️⃣ IMPORTS (at the top):
+   from scripts.operators import Custom, AnswerGenerate, Review, Revise
+   # Add ONLY the operators you will actually use in __call__
+   # ❌ DO NOT import Programmer or Test for QA problems!
+   # RULE: Every operator used → must be imported
+
+2️⃣ CLASS DEFINITION:
+   class Workflow:
+
+3️⃣ INITIALIZATION (__init__ method):
+   def __init__(self, name: str, llm_config, dataset: DatasetType):
+       self.llm = create_llm_instance(llm_config)
+       # Initialize EVERY operator you import
+       # If you import AnswerGenerate, MUST have: self.answer_generate = AnswerGenerate(self.llm)
+       # If you import Review, MUST have: self.review = Review(self.llm)
+       # RULE: Every import → must be initialized
+
+4️⃣ CALL METHOD:
+   async def __call__(self, problem: str):  # ONLY 1 parameter for QA!
+       # Your workflow logic using initialized operators
+       return answer, cost
+
+⚠️ VALIDATION RULES (causes reward=0.0 if violated):
+- Every operator used in __call__ MUST be imported
+- Every operator imported MUST be initialized in __init__
+- Imports and initializations MUST match exactly
+- Example: If you use self.revise(...), you need:
+  ✓ Import: from scripts.operators import Revise
+  ✓ Init: self.revise = Revise(self.llm)
+
+╔══════════════════════════════════════════════════════════════╗
+║  ⚠️ CRITICAL: Revise Operator Usage for QA Problems        ║
+╚══════════════════════════════════════════════════════════════╝
+
+When using the Revise operator, ensure you return the ANSWER, not meta-commentary:
+
+❌ WRONG - Returns meta-commentary:
+    revised = await self.revise(problem=problem, solution=initial, feedback=fb)
+    return revised['solution'], cost
+    # BUG: May contain "Based on the feedback, revised solution is..."
+    # Should return the actual answer content
+
+✅ CORRECT - Return clean answer:
+    revised = await self.revise(problem=problem, solution=initial, feedback=fb)
+    # For QA, typically the revised solution IS the answer
+    # But ensure it's clean and not meta-commentary
+    answer = revised['solution'].strip()
+    return answer, cost
+
 # Required imports for QA problems
 from scripts.operators import Custom, AnswerGenerate, Review, Revise, ScEnsemble
 from scripts.async_llm import create_llm_instance
@@ -351,6 +441,90 @@ REMEMBER:
 - EVERY operator must match the problem type
 - Violating constraints is the #1 cause of failure
 - Programmer/Test usage = 0 reward in training
+
+╔══════════════════════════════════════════════════════════════╗
+║  🎯 CRITICAL: Complete Code Structure Required              ║
+╚══════════════════════════════════════════════════════════════╝
+
+Your generated code MUST include ALL of these sections:
+
+1️⃣ IMPORTS (at the top):
+   from scripts.operators import Custom, AnswerGenerate, Review, Revise, ScEnsemble
+   # Add ONLY the operators you will actually use in __call__
+   # ❌ DO NOT import Programmer or Test for MATH problems!
+   # RULE: Every operator used → must be imported
+
+2️⃣ CLASS DEFINITION:
+   class Workflow:
+
+3️⃣ INITIALIZATION (__init__ method):
+   def __init__(self, name: str, llm_config, dataset: DatasetType):
+       self.llm = create_llm_instance(llm_config)
+       # Initialize EVERY operator you import
+       # If you import AnswerGenerate, MUST have: self.answer_generate = AnswerGenerate(self.llm)
+       # If you import Review, MUST have: self.review = Review(self.llm)
+       # If you import Revise, MUST have: self.revise = Revise(self.llm)
+       # RULE: Every import → must be initialized
+
+4️⃣ CALL METHOD:
+   async def __call__(self, problem: str):  # ONLY 1 parameter for MATH!
+       # Your workflow logic using initialized operators
+       return answer, cost
+
+⚠️ VALIDATION RULES (causes reward=0.0 if violated):
+- Every operator used in __call__ MUST be imported
+- Every operator imported MUST be initialized in __init__
+- Imports and initializations MUST match exactly
+- Example: If you use self.sc_ensemble(...), you need:
+  ✓ Import: from scripts.operators import ScEnsemble
+  ✓ Init: self.sc_ensemble = ScEnsemble(self.llm)
+
+╔══════════════════════════════════════════════════════════════╗
+║  ⚠️ CRITICAL: Revise Operator Usage for MATH Problems      ║
+╚══════════════════════════════════════════════════════════════╝
+
+When using the Revise operator, ALWAYS extract ONLY the final answer:
+
+❌ WRONG - Returns full explanation instead of answer:
+    revised = await self.revise(problem=problem, solution=initial, feedback=fb)
+    return f"\\boxed{{{revised['solution']}}}", cost
+    # BUG: revised['solution'] contains "Based on the feedback, the answer is 42..."
+    # Result: \\boxed{{Based on the feedback, the answer is 42...}} ❌
+
+✅ CORRECT - Extract numeric answer only:
+    revised = await self.revise(problem=problem, solution=initial, feedback=fb)
+    # Extract the final numeric answer from the explanation
+    import re
+    match = re.search(r'[-+]?\\d+\\.?\\d*', revised['solution'])
+    final_answer = match.group(0) if match else revised['solution']
+    return f"\\boxed{{{final_answer}}}", cost
+    # Result: \\boxed{{42}} ✅
+
+BEST PRACTICE - Complete Review-Revise workflow:
+    # Step 1: Generate initial solution
+    initial = await self.answer_generate(input=problem)
+
+    # Step 2: Review the solution
+    review = await self.review(problem=problem, solution=initial['answer'])
+
+    # Step 3: Revise if needed and extract answer
+    if not review['review_result']:
+        revised = await self.revise(
+            problem=problem,
+            solution=initial['answer'],
+            feedback=review['feedback']
+        )
+        # Extract numeric answer
+        import re
+        match = re.search(r'[-+]?\\d+\\.?\\d*', revised['solution'])
+        final_answer = match.group(0) if match else revised['solution']
+    else:
+        final_answer = initial['answer']
+
+    return f"\\boxed{{{final_answer}}}", self.llm.get_usage_summary()["total_cost"]
+
+⚠️ KEY POINT: The 'solution' field may contain full explanations.
+   You MUST extract the final numeric answer before returning it.
 
 # Required imports for MATH problems
 from scripts.operators import Custom, AnswerGenerate, Review, Revise, ScEnsemble

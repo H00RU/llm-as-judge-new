@@ -28,6 +28,14 @@ except ImportError:
     from answer_extractor_v2 import AnswerExtractor
 
 
+# 🆕 默认严格程度配置 - 确保default值与某个训练阶段一致（Stage 2: moderate）
+DEFAULT_STRICTNESS = {
+    'auto_fix_cap': 0.7,              # Stage 2的值（中等严格）
+    'operator_mismatch_cap': 0.2,     # Stage 2的值（非零容忍）
+    'mode': 'moderate'
+}
+
+
 class RewardComputer:
     """
     5-Tier granular reward system with problem-type-specific logic.
@@ -174,37 +182,27 @@ class RewardComputer:
         else:
             base_tier = self._compute_qa_reward(pred_extracted, gt_extracted)
 
-        # Step 3: Apply structure correctness rewards and penalties
-        structure_adjustment = 0.0
-        structure_reason = ""
+        # Step 3: 计算结构性约束上限（Hard Cap）
+        # 修正理念：保留auto-fix但通过降低cap引导学习（而非零奖励导致训练崩溃）
 
-        # 3.1: Check for validation failures
-        if execution_metadata.get('validation_failed', False):
-            structure_adjustment -= 0.3
-            structure_reason += "Validation failed; "
+        # 🆕 获取Progressive Strictness配置（来自trainer），如无则使用DEFAULT_STRICTNESS确保一致性
+        strictness = metadata.get('strictness', DEFAULT_STRICTNESS) if metadata else DEFAULT_STRICTNESS
+        current_step = metadata.get('step', -1) if metadata else -1
 
-        # 3.2: Check for operator-problem type mismatches (critical!)
-        if execution_metadata.get('operator_problem_type_mismatch', False):
-            mismatch_type = execution_metadata.get('mismatch_type', 'unknown')
-            structure_adjustment -= 0.5  # Heavy penalty for using wrong operators
-            structure_reason += f"Operator mismatch ({mismatch_type}); "
+        # 计算结构性上限（通过helper方法简化逻辑）
+        structure_cap, structure_reason = self._compute_structure_cap(
+            execution_metadata,
+            strictness
+        )
 
-        # 3.3: Check for fallback usage (indicates generation failure)
-        if execution_metadata.get('needed_fallback', False):
-            fallback_type = execution_metadata.get('fallback_type', 'unknown')
-            structure_adjustment -= 0.4
-            structure_reason += f"Fallback used ({fallback_type}); "
+        # 提取关键指标用于返回breakdown中
+        auto_fixes_applied = execution_metadata.get('auto_fixes_applied', [])
+        auto_fix_used = any('auto_fixed' in fix for fix in auto_fixes_applied)
+        signature_downgrade_count = execution_metadata.get('signature_downgrade_count', 0)
 
-        # 3.4: Reward proper workflow structure
-        # If no structural issues, give a small bonus
-        if not execution_metadata.get('validation_failed', False) and \
-           not execution_metadata.get('operator_problem_type_mismatch', False) and \
-           not execution_metadata.get('needed_fallback', False):
-            structure_adjustment += 0.1
-            structure_reason = "Perfect workflow structure; "
-
-        # Step 4: Compute final reward (ensure stays in tier boundaries)
-        final_reward = max(0.0, base_tier + structure_adjustment)
+        # Step 4: 取最小值（Hard Cap override base tier）
+        # 关键：即使答案正确（base_tier=0.7），错误设计（cap=0.0）→ final=0.0
+        final_reward = min(base_tier, structure_cap)
 
         # Snap to nearest tier
         tier_levels = [0.0, 0.2, 0.4, 0.7, 1.0]
@@ -217,15 +215,83 @@ class RewardComputer:
             'tier': tier_index + 1,  # 1-5
             'breakdown': {
                 'base_tier': base_tier,
-                'structure_adjustment': structure_adjustment,
+                'structure_cap': structure_cap,
                 'final_reward': final_reward,
-                'structure_reason': structure_reason.strip(),
+                'structure_reason': '; '.join(structure_reason) if structure_reason else '',
                 'problem_type': problem_type,
-                'validation_failed': execution_metadata.get('validation_failed', False),
+                'auto_fix_used': auto_fix_used,  # 🆕 关键指标
                 'operator_mismatch': execution_metadata.get('operator_problem_type_mismatch', False),
-                'needed_fallback': execution_metadata.get('needed_fallback', False)
+                'needed_fallback': execution_metadata.get('needed_fallback', False),
+                'signature_downgrade_count': signature_downgrade_count,
+                'validation_failed': execution_metadata.get('validation_failed', False)  # 保留但不作为主要惩罚
             }
         }
+
+    # ==================== STRUCTURE CAP COMPUTATION ====================
+
+    def _compute_structure_cap(self, execution_metadata: Dict, strictness: Dict) -> Tuple[float, list]:
+        """
+        计算结构性约束的上限(Hard Cap)
+
+        Strategy: 多个约束条件，取最严格的(min)
+
+        优先级顺序（从严格到宽松）：
+        1. operator_problem_type_mismatch → cap = operator_mismatch_cap (0.0-0.4)
+        2. needed_fallback → cap = 0.4
+        3. auto_fix_used → cap = auto_fix_cap (0.5-0.85)
+        4. 完美结构 → cap = 1.0+
+
+        Returns:
+            (structure_cap: float, structure_reason: list of str)
+        """
+        caps = []
+        reasons = []
+
+        # 获取progressive configs
+        auto_fix_cap = strictness.get('auto_fix_cap', 0.7)
+        operator_mismatch_cap = strictness.get('operator_mismatch_cap', 0.0)
+
+        # Critical violation: operator mismatch takes priority
+        if execution_metadata.get('operator_problem_type_mismatch', False):
+            op_cap = operator_mismatch_cap
+            mismatch_type = execution_metadata.get('mismatch_type', 'unknown')
+            reasons.append(f"Operator mismatch ({mismatch_type}) [cap={op_cap}]")
+            return op_cap, reasons  # 直接返回，这是最严格的约束
+
+        # Moderate violation: fallback
+        if execution_metadata.get('needed_fallback', False):
+            fallback_type = execution_metadata.get('fallback_type', 'unknown')
+            caps.append(0.4)
+            reasons.append(f"Fallback used ({fallback_type}) [cap=0.4]")
+
+        # Minor violation: auto-fix
+        auto_fixes_applied = execution_metadata.get('auto_fixes_applied', [])
+        auto_fix_used = any('auto_fixed' in fix for fix in auto_fixes_applied)
+        if auto_fix_used:
+            caps.append(auto_fix_cap)
+            auto_fix_types = [f for f in auto_fixes_applied if 'auto_fixed' in f]
+            reasons.append(f"Auto-fix used ({', '.join(auto_fix_types)}) [cap={auto_fix_cap}]")
+
+        # Apply signature downgrade penalty
+        signature_downgrade_count = execution_metadata.get('signature_downgrade_count', 0)
+        if signature_downgrade_count > 0:
+            penalty = min(0.15 * signature_downgrade_count, 0.3)
+            reasons.append(f"Signature downgraded {signature_downgrade_count}x [-{penalty}]")
+
+        # Perfect structure bonus (no violations)
+        if not caps:  # 没有任何moderate或minor violations
+            caps.append(1.1)
+            reasons.append("Perfect workflow structure [cap=1.1]")
+
+        # 取最严格的cap（最小值）
+        final_cap = min(caps) if caps else 1.0
+
+        # 应用signature downgrade惩罚
+        if signature_downgrade_count > 0:
+            penalty = min(0.15 * signature_downgrade_count, 0.3)
+            final_cap = max(0.0, final_cap - penalty)
+
+        return final_cap, reasons
 
     # ==================== MATH REWARD COMPUTATION ====================
 
