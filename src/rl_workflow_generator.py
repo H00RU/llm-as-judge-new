@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Tuple
 import sys
 import os
 
-from src.workflow_validator_v2 import WorkflowValidatorV2
+from src.workflow_validator import WorkflowValidator
 
 class RLWorkflowGenerator:
     """使用RL训练的Qwen2.5-7B生成优化的工作流"""
@@ -104,7 +104,7 @@ class RLWorkflowGenerator:
         self.operator_descriptions = self._load_operator_descriptions(operator_descriptions_path)
 
         # 初始化统一验证器（合并了代码构建器和一致性检查器功能）
-        self.validator = WorkflowValidatorV2()
+        self.validator = WorkflowValidator()
 
         print(f"✅ RL工作流生成器初始化完成")
 
@@ -143,556 +143,117 @@ class RLWorkflowGenerator:
         }
 
     def _build_generation_prompt(self, problem: str, problem_type: str) -> str:
-        """构建提示词，明确算子 API，让模型自主学习选择"""
+        """Generate workflow prompt in clean XML format"""
 
-        # 代码题专用模板
-        if problem_type == "code":
-            prompt = f"""Generate a Python Workflow class to solve the CODE problem.
+        # Base prompt with XML structure and operator definitions
+        base_prompt = f"""You are building a Workflow to solve {problem_type} problems.
 
-🚨 CRITICAL REQUIREMENTS for CODE problems - DO NOT IGNORE:
-❌ MUST be async def __call__(self, problem: str, entry_point: str, test: str)
-✅ MUST accept THREE parameters (problem, entry_point, test)
-✅ MUST use Programmer to generate code
-✅ MUST use Test to execute the code with test cases
-✅ MUST return (answer, cost) tuple, NOT (code, answer)
+You MUST output in the following XML format:
 
-CONSEQUENCES OF VIOLATION:
-- Using wrong signature → TypeError → execution fails
-- Not using Programmer → No code generation → 0 reward
-- Not using Test → No testing → 0 reward
-- Returning wrong format → Type error → execution fails
+```xml
+<workflow>
+  <graph>
+    class Workflow:
+        def __init__(self, name: str, llm_config, dataset):
+            self.name = name
+            self.dataset = dataset
+            self.llm = create_llm_instance(llm_config)
+            # Initialize operators you will use
 
-╔══════════════════════════════════════════════════════════════╗
-║  🎯 CRITICAL: Complete Code Structure Required              ║
-╚══════════════════════════════════════════════════════════════╝
-
-Your generated code MUST include ALL of these sections:
-
-1️⃣ IMPORTS (at the top):
-   from scripts.operators import Programmer, Test, Review
-   # Add ONLY the operators you will actually use in __call__
-   # RULE: Every operator used → must be imported
-
-2️⃣ CLASS DEFINITION:
-   class Workflow:
-
-3️⃣ INITIALIZATION (__init__ method):
-   def __init__(self, name: str, llm_config, dataset: DatasetType):
-       self.llm = create_llm_instance(llm_config)
-       # Initialize EVERY operator you import
-       # If you import Programmer, you MUST have: self.programmer = Programmer(self.llm)
-       # If you import Test, you MUST have: self.test = Test(self.llm)
-       # RULE: Every import → must be initialized
-
-4️⃣ CALL METHOD:
-   async def __call__(self, problem: str, entry_point: str, test: str):
-       # Your workflow logic using initialized operators
-       return answer, cost
-
-⚠️ VALIDATION RULES (causes reward=0.0 if violated):
-- Every operator used in __call__ MUST be imported
-- Every operator imported MUST be initialized in __init__
-- Imports and initializations MUST match exactly
-- Example: If you use self.review(...), you need:
-  ✓ Import: from scripts.operators import Review
-  ✓ Init: self.review = Review(self.llm)
-
-CODE PROBLEM WORKFLOW STRUCTURE:
-```python
-from scripts.operators import Custom, AnswerGenerate, Programmer, Test, Review, Revise, ScEnsemble
-from scripts.async_llm import create_llm_instance
-from scripts.evaluator import DatasetType
-
-class Workflow:
-    def __init__(self, name: str, llm_config, dataset: DatasetType):
-        self.name = name
-        self.dataset = dataset
-        self.llm = create_llm_instance(llm_config)
-        # REQUIRED: Initialize programmers for code generation
-        self.programmer = Programmer(self.llm)
-        # REQUIRED: Initialize tester for test execution
-        self.test = Test(self.llm)
-        # OPTIONAL: Add reviewer if you want feedback
-        self.review = Review(self.llm)
-
-    async def __call__(self, problem: str, entry_point: str, test: str):
-        # REQUIRED: Three parameters for code problems
-        # Step 1: Generate code using Programmer
-        code_result = await self.programmer(problem=problem, analysis="")
-
-        # Step 2: Test the code using provided test cases
-        test_result = await self.test(
-            problem=problem,
-            solution=code_result['code'],
-            entry_point=entry_point
-        )
-
-        # Step 3: Return execution result (NOT the code itself)
-        if test_result['result']:
-            # Test passed - return the solution
-            return test_result['solution'], self.llm.get_usage_summary()["total_cost"]
-        else:
-            # Test failed - return the output (may contain error messages)
-            return code_result['output'], self.llm.get_usage_summary()["total_cost"]
+        async def __call__(self, problem: str, entry_point: str = "solve"):
+            # Chain operators and return (answer, cost) tuple
+            result = await self.operator(input, instruction)
+            return final_answer, self.llm.get_usage_summary()["total_cost"]
+  </graph>
+  <prompt>
+    TASK_PROMPT = '''Task-specific prompt here'''
+  </prompt>
+</workflow>
 ```
 
-Available Operators:
+## Available Operators
 
-from scripts.operators import Custom, AnswerGenerate, Programmer, Test, Review, Revise, ScEnsemble
-from scripts.async_llm import create_llm_instance
-from scripts.evaluator import DatasetType
+Custom(input: str, instruction: str) -> {{'response': str}}
+AnswerGenerate(input: str) -> {{'thought': str, 'answer': str}}
+Programmer(problem: str, analysis: str) -> {{'code': str, 'output': str}}
+Test(problem: str, solution: str, entry_point: str) -> {{'result': bool, 'solution': str}}
+Review(problem: str, solution: str) -> {{'review_result': bool, 'feedback': str}}
+Revise(problem: str, solution: str, feedback: str) -> {{'solution': str}}
+ScEnsemble(solutions: List[str], problem: str) -> {{'response': str}}
 
+## Core Rules
+- Use .get('key', default) for safe dictionary access
+- Always return (answer, cost) tuple
+- Initialize all operators before using
+- Import only operators you actually use"""
+
+        # Problem-type-specific constraints
+        if problem_type == "code":
+            type_constraint = """
+
+## CODE Problem Specific Rules
+- async def __call__(self, problem: str, entry_point: str, test: str)
+- MUST use Programmer to generate code
+- MUST use Test to execute with test cases
+- Return (solution, cost) tuple
+
+Required Pattern:
+from scripts.operators import Programmer, Test
 class Workflow:
-    def __init__(self, name: str, llm_config, dataset: DatasetType):
-        self.name = name
-        self.dataset = dataset
+    def __init__(self, name: str, llm_config, dataset):
         self.llm = create_llm_instance(llm_config)
-        # Initialize Programmer and Test (required for code problems)
         self.programmer = Programmer(self.llm)
         self.test = Test(self.llm)
 
     async def __call__(self, problem: str, entry_point: str, test: str):
-        # Solve: {problem}
-        # Generate code using Programmer
-        code_result = await self.programmer(problem=problem, analysis='')
+        code_result = await self.programmer(problem=problem, analysis="")
+        test_result = await self.test(problem=problem, solution=code_result['code'], entry_point=entry_point)
+        return test_result['solution'] if test_result['result'] else code_result['output'], self.llm.get_usage_summary()["total_cost"]"""
 
-        # Test the code (this returns execution result, not code string)
-        test_result = await self.test(
-            problem=problem,
-            solution=code_result['code'],
-            entry_point=entry_point
-        )
+        elif problem_type == "math":
+            type_constraint = """
 
-        # CRITICAL: Return execution result and cost
-        # test_result['solution'] contains the final code
-        # Return the execution output, not the code
-        return code_result['output'], self.llm.get_usage_summary()["total_cost"]
-"""
-            return prompt
+## MATH Problem Specific Rules
+- async def __call__(self, problem: str)
+- Use AnswerGenerate for step-by-step reasoning
+- DO NOT use Programmer or Test
+- Return (answer, cost) tuple
 
-        # QA题专用模板
-        if problem_type == "qa":
-            prompt = f"""Generate a Python Workflow class to solve the QA problem.
-
-╔══════════════════════════════════════════════════════════════╗
-║  🚨 CRITICAL CONSTRAINTS for QA problems - ZERO TOLERANCE   ║
-╚══════════════════════════════════════════════════════════════╝
-
-FORBIDDEN OPERATORS (causes 100% FAILURE):
-  ❌ Programmer - generates code, but QA needs natural language answers
-  ❌ Test - requires test cases from dataset, QA has NONE
-
-REQUIRED SIGNATURE:
-  ✅ async def __call__(self, problem: str) - ONLY 1 parameter!
-  ✅ return (answer, cost) tuple where answer is text
-
-REQUIRED OPERATORS:
-  ✅ AnswerGenerate - provides natural language answers
-  ✅ Custom/Review/Revise - for refinement and verification
-
-WHY THE CONSTRAINTS MATTER:
-If you use Programmer or Test:
-  1. Programmer will generate code, not answer the question
-  2. Test will trigger NoneType error (no test cases for QA)
-  3. Workflow execution FAILS immediately
-  4. You get ZERO reward - no learning signal
-
-If you use 3 parameters instead of 1:
-  1. Executor will try to pass entry_point and test
-  2. TypeError: unexpected keyword arguments
-  3. Execution fails, Fallback triggered
-  4. You get ZERO reward
-
-WRONG EXAMPLE (DO NOT COPY - THIS FAILS 100%):
-    # ❌ This is completely wrong for QA:
-    async def __call__(self, problem: str, entry_point: str, test: str):
-        code = await self.programmer(problem=problem)
-        result = await self.test(problem=problem, solution=code)
-        return result, cost
-    # Result: TypeError + NoneType error, 0 reward, FAIL
-
-CORRECT EXAMPLE (COPY THIS PATTERN):
-    # ✅ This is the ONLY correct pattern:
-    async def __call__(self, problem: str):
-        solution = await self.answer_generate(input=problem)
-        return solution['answer'], self.llm.get_usage_summary()["total_cost"]
-    # Result: proper QA answer, PASS
-
-REMEMBER:
-- ONLY 1 parameter: problem
-- NEVER use Programmer or Test
-- EVERY operator must match the problem type
-- Violating constraints is the #1 cause of failure
-
-╔══════════════════════════════════════════════════════════════╗
-║  🎯 CRITICAL: Complete Code Structure Required              ║
-╚══════════════════════════════════════════════════════════════╝
-
-Your generated code MUST include ALL of these sections:
-
-1️⃣ IMPORTS (at the top):
-   from scripts.operators import Custom, AnswerGenerate, Review, Revise
-   # Add ONLY the operators you will actually use in __call__
-   # ❌ DO NOT import Programmer or Test for QA problems!
-   # RULE: Every operator used → must be imported
-
-2️⃣ CLASS DEFINITION:
-   class Workflow:
-
-3️⃣ INITIALIZATION (__init__ method):
-   def __init__(self, name: str, llm_config, dataset: DatasetType):
-       self.llm = create_llm_instance(llm_config)
-       # Initialize EVERY operator you import
-       # If you import AnswerGenerate, MUST have: self.answer_generate = AnswerGenerate(self.llm)
-       # If you import Review, MUST have: self.review = Review(self.llm)
-       # RULE: Every import → must be initialized
-
-4️⃣ CALL METHOD:
-   async def __call__(self, problem: str):  # ONLY 1 parameter for QA!
-       # Your workflow logic using initialized operators
-       return answer, cost
-
-⚠️ VALIDATION RULES (causes reward=0.0 if violated):
-- Every operator used in __call__ MUST be imported
-- Every operator imported MUST be initialized in __init__
-- Imports and initializations MUST match exactly
-- Example: If you use self.revise(...), you need:
-  ✓ Import: from scripts.operators import Revise
-  ✓ Init: self.revise = Revise(self.llm)
-
-╔══════════════════════════════════════════════════════════════╗
-║  ⚠️ CRITICAL: Revise Operator Usage for QA Problems        ║
-╚══════════════════════════════════════════════════════════════╝
-
-When using the Revise operator, ensure you return the ANSWER, not meta-commentary:
-
-❌ WRONG - Returns meta-commentary:
-    revised = await self.revise(problem=problem, solution=initial, feedback=fb)
-    return revised['solution'], cost
-    # BUG: May contain "Based on the feedback, revised solution is..."
-    # Should return the actual answer content
-
-✅ CORRECT - Return clean answer:
-    revised = await self.revise(problem=problem, solution=initial, feedback=fb)
-    # For QA, typically the revised solution IS the answer
-    # But ensure it's clean and not meta-commentary
-    answer = revised['solution'].strip()
-    return answer, cost
-
-# Required imports for QA problems
-from scripts.operators import Custom, AnswerGenerate, Review, Revise, ScEnsemble
-from scripts.async_llm import create_llm_instance
-from scripts.evaluator import DatasetType
-
+Required Pattern:
+from scripts.operators import AnswerGenerate
 class Workflow:
-    def __init__(self, name: str, llm_config, dataset: DatasetType):
-        self.name = name
-        self.dataset = dataset
+    def __init__(self, name: str, llm_config, dataset):
         self.llm = create_llm_instance(llm_config)
-        # Initialize QA-appropriate operators
         self.answer_generate = AnswerGenerate(self.llm)
-        self.review = Review(self.llm)
-        self.revise = Revise(self.llm)
 
     async def __call__(self, problem: str):
-        # Answer this QA question directly
         solution = await self.answer_generate(input=problem)
-        return solution['answer'], self.llm.get_usage_summary()["total_cost"]
-"""
-            return prompt
+        return solution['answer'], self.llm.get_usage_summary()["total_cost"]"""
 
-        # 数学题专用模板（强化版 - 包含WRONG example和后果说明）
-        if problem_type == "math":
-            prompt = f"""Generate a Python Workflow class to solve the MATH problem.
+        elif problem_type == "qa":
+            type_constraint = """
 
-╔══════════════════════════════════════════════════════════════╗
-║  🚨 CRITICAL CONSTRAINTS for MATH problems - ZERO TOLERANCE ║
-╚══════════════════════════════════════════════════════════════╝
+## QA Problem Specific Rules
+- async def __call__(self, problem: str)
+- Use AnswerGenerate for text answers
+- DO NOT use Programmer or Test
+- Return (answer, cost) tuple
 
-FORBIDDEN OPERATORS (causes 100% FAILURE):
-  ❌ Programmer - generates code, but math needs step-by-step reasoning
-  ❌ Test - requires test cases from dataset, math has NONE
-
-REQUIRED OPERATORS:
-  ✅ AnswerGenerate - provides step-by-step mathematical reasoning
-  ✅ Custom/Review/Revise - for refinement and verification
-
-WHY THE CONSTRAINTS MATTER:
-If you use Programmer or Test:
-  1. Programmer will generate code, not mathematical reasoning
-  2. Test will trigger NoneType error (no test cases exist for math)
-  3. Workflow execution FAILS immediately
-  4. You get ZERO reward - no learning signal
-
-WRONG EXAMPLE (DO NOT COPY - THIS FAILS 100%):
-    # ❌ This is completely wrong for MATH problems:
-    code = await self.programmer(problem=problem)
-    result = await self.test(problem=problem, solution=code)
-    return result, cost
-    # Result: NoneType error, 0 reward, FAIL
-
-CORRECT EXAMPLE (COPY THIS PATTERN):
-    # ✅ This is the ONLY correct pattern:
-    solution = await self.answer_generate(input=problem)
-    return solution['answer'], self.llm.get_usage_summary()["total_cost"]
-    # Result: proper reasoning, correct answer, PASS
-
-REMEMBER:
-- EVERY operator must match the problem type
-- Violating constraints is the #1 cause of failure
-- Programmer/Test usage = 0 reward in training
-
-╔══════════════════════════════════════════════════════════════╗
-║  🎯 CRITICAL: Complete Code Structure Required              ║
-╚══════════════════════════════════════════════════════════════╝
-
-Your generated code MUST include ALL of these sections:
-
-1️⃣ IMPORTS (at the top):
-   from scripts.operators import Custom, AnswerGenerate, Review, Revise, ScEnsemble
-   # Add ONLY the operators you will actually use in __call__
-   # ❌ DO NOT import Programmer or Test for MATH problems!
-   # RULE: Every operator used → must be imported
-
-2️⃣ CLASS DEFINITION:
-   class Workflow:
-
-3️⃣ INITIALIZATION (__init__ method):
-   def __init__(self, name: str, llm_config, dataset: DatasetType):
-       self.llm = create_llm_instance(llm_config)
-       # Initialize EVERY operator you import
-       # If you import AnswerGenerate, MUST have: self.answer_generate = AnswerGenerate(self.llm)
-       # If you import Review, MUST have: self.review = Review(self.llm)
-       # If you import Revise, MUST have: self.revise = Revise(self.llm)
-       # RULE: Every import → must be initialized
-
-4️⃣ CALL METHOD:
-   async def __call__(self, problem: str):  # ONLY 1 parameter for MATH!
-       # Your workflow logic using initialized operators
-       return answer, cost
-
-⚠️ VALIDATION RULES (causes reward=0.0 if violated):
-- Every operator used in __call__ MUST be imported
-- Every operator imported MUST be initialized in __init__
-- Imports and initializations MUST match exactly
-- Example: If you use self.sc_ensemble(...), you need:
-  ✓ Import: from scripts.operators import ScEnsemble
-  ✓ Init: self.sc_ensemble = ScEnsemble(self.llm)
-
-╔══════════════════════════════════════════════════════════════╗
-║  ⚠️ CRITICAL: Revise Operator Usage for MATH Problems      ║
-╚══════════════════════════════════════════════════════════════╝
-
-When using the Revise operator, ALWAYS extract ONLY the final answer:
-
-❌ WRONG - Returns full explanation instead of answer:
-    revised = await self.revise(problem=problem, solution=initial, feedback=fb)
-    return f"\\boxed{{{revised['solution']}}}", cost
-    # BUG: revised['solution'] contains "Based on the feedback, the answer is 42..."
-    # Result: \\boxed{{Based on the feedback, the answer is 42...}} ❌
-
-✅ CORRECT - Extract numeric answer only:
-    revised = await self.revise(problem=problem, solution=initial, feedback=fb)
-    # Extract the final numeric answer from the explanation
-    import re
-    match = re.search(r'[-+]?\\d+\\.?\\d*', revised['solution'])
-    final_answer = match.group(0) if match else revised['solution']
-    return f"\\boxed{{{final_answer}}}", cost
-    # Result: \\boxed{{42}} ✅
-
-BEST PRACTICE - Complete Review-Revise workflow:
-    # Step 1: Generate initial solution
-    initial = await self.answer_generate(input=problem)
-
-    # Step 2: Review the solution
-    review = await self.review(problem=problem, solution=initial['answer'])
-
-    # Step 3: Revise if needed and extract answer
-    if not review['review_result']:
-        revised = await self.revise(
-            problem=problem,
-            solution=initial['answer'],
-            feedback=review['feedback']
-        )
-        # Extract numeric answer
-        import re
-        match = re.search(r'[-+]?\\d+\\.?\\d*', revised['solution'])
-        final_answer = match.group(0) if match else revised['solution']
-    else:
-        final_answer = initial['answer']
-
-    return f"\\boxed{{{final_answer}}}", self.llm.get_usage_summary()["total_cost"]
-
-⚠️ KEY POINT: The 'solution' field may contain full explanations.
-   You MUST extract the final numeric answer before returning it.
-
-# Required imports for MATH problems
-from scripts.operators import Custom, AnswerGenerate, Review, Revise, ScEnsemble
-from scripts.async_llm import create_llm_instance
-from scripts.evaluator import DatasetType
-
+Required Pattern:
+from scripts.operators import AnswerGenerate
 class Workflow:
-    def __init__(self, name: str, llm_config, dataset: DatasetType):
-        self.name = name
-        self.dataset = dataset
+    def __init__(self, name: str, llm_config, dataset):
         self.llm = create_llm_instance(llm_config)
-
-        # IMPORTANT: Initialize ALL operators you will use
-        self.custom = Custom(self.llm)
         self.answer_generate = AnswerGenerate(self.llm)
-        self.review = Review(self.llm)
-        self.revise = Revise(self.llm)
-        self.sc_ensemble = ScEnsemble(self.llm)
 
     async def __call__(self, problem: str):
-        # Solve this math problem step-by-step
         solution = await self.answer_generate(input=problem)
-        return solution['answer'], self.llm.get_usage_summary()["total_cost"]
-"""
-            return prompt
+        return solution['answer'], self.llm.get_usage_summary()["total_cost"]"""
 
-        # QA题专用模板（保留）
-        prompt = f"""Generate a Python Workflow class to solve the given problem.
+        else:
+            type_constraint = ""
 
-IMPORTANT: Consider the problem's difficulty and complexity when designing your workflow.
-- Some problems are simple and straightforward
-- Some problems are complex and require careful handling
-- Choose your strategy based on what you observe about the problem
-
-⚠️ CRITICAL CONSTRAINTS for NON-CODE problems (MATH/QA):
-❌ DO NOT use Programmer operator - This problem is not about code generation
-❌ DO NOT use Test operator - This problem has no automated test cases
-✅ ONLY use: Custom, AnswerGenerate, Review, Revise, ScEnsemble
-
-Why these constraints matter:
-- Programmer generates Python code, but MATH/QA problems need reasoning or text answers
-- Test requires code with test cases, which doesn't apply to MATH/QA
-- Using Programmer/Test causes NoneType errors and 100% failure rate
-
-CORRECT example for MATH/QA:
-async def __call__(self, problem: str):
-    solution = await self.answer_generate(input=problem)  # ✅ Step-by-step reasoning
-    return solution['answer'], self.llm.get_usage_summary()["total_cost"]
-
-WRONG example (causes failure):
-async def __call__(self, problem: str):
-    code = await self.programmer(problem=problem)  # ❌ DO NOT use for MATH/QA!
-    result = await self.test(problem=problem, solution=code)  # ❌ Fails!
-
-CRITICAL RULES:
-- Only use operators listed below with their EXACT parameters
-- Initialize ALL variables before using them - never return undefined variables
-- If a variable is defined inside an if-block, either initialize it before the if-block OR handle both branches
-- Design your workflow freely - you decide which operators to use and how to combine them (but respect the constraints above)
-
-Available Operators:
-
-1. Custom(llm) - Most flexible, for any custom task
-   Call: await self.custom(input=str, instruction=str)
-   Returns: {{'response': str}}
-
-2. AnswerGenerate(llm) - Step-by-step reasoning
-   Call: await self.answer_generate(input=str)  ← NO instruction parameter!
-   Returns: {{'thought': str, 'answer': str}}
-
-3. Programmer(llm) - Auto-generate and execute Python code
-   Call: await self.programmer(problem=str, analysis=str)
-   Returns: {{'code': str, 'output': str}}
-
-4. Test(llm) - Test code with test cases
-   Call: await self.test(problem=str, solution=str, entry_point=str)
-   Returns: {{'result': bool, 'solution': str}}
-
-5. Review(llm) - Review and validate solution
-   Call: await self.review(problem=str, solution=str)
-   Returns: {{'review_result': bool, 'feedback': str}}
-
-6. Revise(llm) - Revise solution based on feedback
-   Call: await self.revise(problem=str, solution=str, feedback=str)
-   Returns: {{'solution': str}}
-
-7. ScEnsemble(llm) - Self-consistency ensemble voting
-   Call: await self.sc_ensemble(solutions=list, problem=str)
-   Returns: {{'response': str}}
-
-Template (complete the __call__ method):
-
-from scripts.operators import Custom, AnswerGenerate, Programmer, Test, Review, Revise, ScEnsemble
-from scripts.async_llm import create_llm_instance
-from scripts.evaluator import DatasetType
-
-class Workflow:
-    def __init__(self, name: str, llm_config, dataset: DatasetType):
-        self.name = name
-        self.dataset = dataset
-        self.llm = create_llm_instance(llm_config)
-
-        # ⚠️ CRITICAL: Initialize ALL operators you will use in __call__!
-        # Example 1: If you only need answer_generate:
-        # self.answer_generate = AnswerGenerate(self.llm)
-
-        # Example 2: If you need review:
-        # self.answer_generate = AnswerGenerate(self.llm)
-        # self.review = Review(self.llm)
-
-        # Example 3: Full workflow with programmer and test:
-        # self.programmer = Programmer(self.llm)
-        # self.test = Test(self.llm)
-        # self.review = Review(self.llm)
-
-        # Available operators (initialize only what you need):
-        # self.custom = Custom(self.llm)
-        # self.answer_generate = AnswerGenerate(self.llm)
-        # self.programmer = Programmer(self.llm)
-        # self.test = Test(self.llm)
-        # self.review = Review(self.llm)
-        # self.sc_ensemble = ScEnsemble(self.llm)
-
-    async def __call__(self, problem: str):
-        # Solve: {problem}
-        # CRITICAL: MUST return (answer_string, cost_float) tuple
-        # - First value MUST be the final answer (string)
-        # - Second value MUST be the cost (float, from self.llm.get_usage_summary()["total_cost"])
-        #
-        # WRONG: NEVER return (code, answer) - this will cause type errors
-        # CORRECT: ALWAYS return (answer, cost)
-
-        # Example 1 - Simple workflow:
-        # solution = await self.answer_generate(input=problem)
-        # return solution['answer'], self.llm.get_usage_summary()["total_cost"]
-
-        # Example 2 - Review loop:
-        # solution = await self.answer_generate(input=problem)
-        # review = await self.review(problem=problem, solution=solution['answer'])
-        # if not review['review_result']:
-        #     # Regenerate or use feedback to guide next attempt
-        #     solution = await self.answer_generate(input=problem + "\n" + review['feedback'])
-        # return solution['answer'], self.llm.get_usage_summary()["total_cost"]
-
-        # Example 3 - Code problem workflow:
-        # code_result = await self.programmer(problem=problem, analysis='None')
-        # test_result = await self.test(problem=problem, solution=code_result['code'], entry_point='solution')
-        # if test_result['result']:
-        #     return test_result['solution'], self.llm.get_usage_summary()["total_cost"]
-        # return code_result['output'], self.llm.get_usage_summary()["total_cost"]
-
-        # IMPORTANT: Always initialize variables before any if-blocks!
-        # Good:
-        #   answer = await self.answer_generate(input=problem)
-        #   final = answer['answer']  # Initialize
-        #   if condition:
-        #       final = modified  # Modify
-        #   return final, cost  # Always defined
-        #
-        # Bad (NEVER):
-        #   if condition:
-        #       answer = ...  # Only in if-block
-        #   return answer, cost  # ERROR if condition is False!
-
-        pass
-"""
-
-        return prompt
+        return base_prompt + type_constraint
 
     def generate_workflow(
         self,
@@ -892,7 +453,7 @@ class Workflow:
         """
         解析生成的文本，提取并使用reactive patching进行修复
 
-        新策略：使用WorkflowValidatorV2的reactive patching模式（参考项目验证过）
+        新策略：使用WorkflowValidator的reactive patching模式（参考项目验证过）
         - 只修复实际问题，不做完整重构
         - 更快、更可靠、更少副作用
         """
@@ -911,7 +472,7 @@ class Workflow:
                 print(f"❌ 无法从生成文本中提取代码块")
                 return self._get_default_workflow(problem_type), False, "No code block found"
 
-            # 2. 使用WorkflowValidatorV2进行reactive patching验证
+            # 2. 使用WorkflowValidator进行reactive patching验证
             print(f"🔧 使用reactive patching进行验证和修复...")
             fixed_code, is_valid, error_msg, fixes = self.validator.validate_and_fix_workflow(
                 code=code,

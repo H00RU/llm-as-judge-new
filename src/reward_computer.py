@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-3-Tier Reward System - Simplified
+5-Tier Reward System - Clear Learning Signal
 
-Design:
-- Tier 1 (0.0): Completely wrong or execution failure
-- Tier 2 (0.5): Partially correct
-- Tier 3 (1.0): Perfect/correct
+Tier Structure:
+- Tier 1 (0.0): Execution failure or completely wrong
+- Tier 2 (0.25): 20-40% correct
+- Tier 3 (0.5): 40-70% correct
+- Tier 4 (0.75): 70-95% correct
+- Tier 5 (1.0): 95%+ or perfect
 
-Simple, clean learning signal without complex adjustments or caps.
+Clean learning gradient without complex adjustments or caps.
 """
 import sys
 import os
@@ -27,12 +29,14 @@ except ImportError:
 
 class RewardComputer:
     """
-    3-Tier simplified reward system.
+    5-Tier reward system with clear learning gradient.
 
     Tier Structure:
-    ├── Tier 1 (0.0): Completely wrong or execution failure
-    ├── Tier 2 (0.5): Partially correct
-    └── Tier 3 (1.0): Perfect/correct
+    ├── Tier 1 (0.0): Execution failure or completely wrong (0% correct)
+    ├── Tier 2 (0.25): Minimal progress (20-40% correct)
+    ├── Tier 3 (0.5): Medium progress (40-70% correct)
+    ├── Tier 4 (0.75): Strong progress (70-95% correct)
+    └── Tier 5 (1.0): Perfect or near-perfect (95%+ correct)
     """
 
     def __init__(
@@ -57,8 +61,8 @@ class RewardComputer:
         else:
             self.extractor = None
 
-        print(f"✅ 3-Tier Reward System Initialized")
-        print(f"   Tiers: [0.0, 0.5, 1.0]")
+        print(f"✅ 5-Tier Reward System Initialized")
+        print(f"   Tiers: [0.0, 0.25, 0.5, 0.75, 1.0]")
         print(f"   Answer Extractor: {'Enabled' if use_answer_extractor else 'Disabled'}")
 
     def compute_reward(
@@ -71,20 +75,20 @@ class RewardComputer:
         execution_metadata: Optional[Dict] = None
     ) -> Dict:
         """
-        Simplified 3-tier reward computation.
+        5-tier reward computation with clear learning gradient.
 
         Args:
             problem: Problem text
             prediction: Model's prediction (raw output)
             ground_truth: Expected answer
             problem_type: "math" | "code" | "qa"
-            metadata: Additional context (unused in simplified version)
+            metadata: Additional context
             execution_metadata: Execution success/failure info
 
         Returns:
             {
-                'reward': float,  # [0.0, 0.5, 1.0]
-                'tier': int,      # 1-3
+                'reward': float,  # [0.0, 0.25, 0.5, 0.75, 1.0]
+                'tier': int,      # 1-5
                 'breakdown': {...}
             }
         """
@@ -121,7 +125,7 @@ class RewardComputer:
             pred_extracted = str(prediction)
             gt_extracted = str(ground_truth)
 
-        # Step 3: Compute problem-type-specific reward (3-tier)
+        # Step 3: Compute problem-type-specific reward (5-tier)
         if problem_type == "math":
             reward, reason = self._compute_math_reward(pred_extracted, gt_extracted)
         elif problem_type == "code":
@@ -132,7 +136,7 @@ class RewardComputer:
             reward, reason = self._compute_qa_reward(pred_extracted, gt_extracted)
 
         # Snap to nearest tier
-        tier_levels = [0.0, 0.5, 1.0]
+        tier_levels = [0.0, 0.25, 0.5, 0.75, 1.0]
         reward = min(tier_levels, key=lambda x: abs(x - reward))
         tier_index = tier_levels.index(reward) + 1
 
@@ -149,7 +153,14 @@ class RewardComputer:
 
     def _compute_math_reward(self, prediction: str, ground_truth: str) -> Tuple[float, str]:
         """
-        Compute 3-tier reward for math problems.
+        Compute 5-tier reward for math problems.
+
+        Tiers based on error:
+        - Tier 1 (0.0): error >= 50% or parse error
+        - Tier 2 (0.25): 30-50% error
+        - Tier 3 (0.5): 10-30% error
+        - Tier 4 (0.75): 0.01-10% error
+        - Tier 5 (1.0): < 0.01% error (near perfect)
 
         Returns:
             (reward, reason) tuple
@@ -165,18 +176,22 @@ class RewardComputer:
             if gt_num is None:
                 return (0.0, "Cannot parse ground truth as number")
 
-            # Calculate error
+            # Calculate relative error
             if gt_num == 0:
                 error = abs(pred_num)
             else:
                 error = abs((pred_num - gt_num) / gt_num)
 
-            # 3-tier classification
-            if error < 1e-4:
-                return (1.0, f"Exact match (error={error:.6f})")
-            elif error < 0.1:  # Within 10%
-                return (0.5, f"Partially correct (error={error:.2%})")
-            else:
+            # 5-tier classification based on error thresholds
+            if error < 0.0001:  # < 0.01%
+                return (1.0, f"Perfect/near-perfect (error={error:.6f})")
+            elif error < 0.1:  # < 10%
+                return (0.75, f"Strong (error={error:.2%})")
+            elif error < 0.3:  # < 30%
+                return (0.5, f"Medium progress (error={error:.2%})")
+            elif error < 0.5:  # < 50%
+                return (0.25, f"Minimal progress (error={error:.2%})")
+            else:  # >= 50%
                 return (0.0, f"Wrong answer (error={error:.2%})")
 
         except Exception as e:
@@ -193,7 +208,14 @@ class RewardComputer:
 
     def _compute_code_reward(self, prediction: str, metadata: Dict) -> Tuple[float, str]:
         """
-        Compute 3-tier reward for code problems.
+        Compute 5-tier reward for code problems based on test pass rate.
+
+        Tiers based on pass_rate:
+        - Tier 1 (0.0): 0% or syntax error
+        - Tier 2 (0.25): 1-25% tests passed
+        - Tier 3 (0.5): 25-75% tests passed
+        - Tier 4 (0.75): 75-99% tests passed
+        - Tier 5 (1.0): 99%+ tests passed (all or nearly all)
 
         Returns:
             (reward, reason) tuple
@@ -204,7 +226,7 @@ class RewardComputer:
         if not test_results:
             # No test results - use basic syntax check
             if self._is_valid_python_syntax(prediction):
-                return (0.5, "Valid Python syntax but no test results")
+                return (0.25, "Valid Python syntax but no test results")
             else:
                 return (0.0, "Invalid Python syntax")
 
@@ -217,17 +239,28 @@ class RewardComputer:
 
         pass_rate = passed / total
 
-        # 3-tier classification
-        if pass_rate >= 0.99:  # Allow for rounding
-            return (1.0, f"All tests passed ({passed}/{total})")
-        elif pass_rate >= 0.5:
-            return (0.5, f"Partially correct ({passed}/{total} tests passed)")
-        else:
-            return (0.0, f"Most tests failed ({passed}/{total} tests passed)")
+        # 5-tier classification based on pass rate
+        if pass_rate >= 0.99:  # 99%+ (all or nearly all)
+            return (1.0, f"Perfect ({passed}/{total})")
+        elif pass_rate >= 0.75:  # 75-99%
+            return (0.75, f"Strong ({passed}/{total} tests passed)")
+        elif pass_rate >= 0.25:  # 25-75%
+            return (0.5, f"Medium progress ({passed}/{total} tests passed)")
+        elif pass_rate > 0:  # 1-25%
+            return (0.25, f"Minimal progress ({passed}/{total} tests passed)")
+        else:  # 0%
+            return (0.0, f"Failed ({passed}/{total} tests passed)")
 
     def _compute_qa_reward(self, prediction: str, ground_truth: str) -> Tuple[float, str]:
         """
-        Compute 3-tier reward for QA problems.
+        Compute 5-tier reward for QA problems based on word overlap.
+
+        Tiers based on overlap:
+        - Tier 1 (0.0): 0-20% overlap or empty
+        - Tier 2 (0.25): 20-40% overlap
+        - Tier 3 (0.5): 40-70% overlap
+        - Tier 4 (0.75): 70-90% overlap
+        - Tier 5 (1.0): 90%+ overlap (near/exact match)
 
         Returns:
             (reward, reason) tuple
@@ -249,12 +282,16 @@ class RewardComputer:
 
         overlap = len(pred_words & gt_words) / len(gt_words)
 
-        # 3-tier classification
-        if overlap >= 0.8:
-            return (1.0, f"High overlap ({overlap:.0%})")
-        elif overlap >= 0.4:
-            return (0.5, f"Partial overlap ({overlap:.0%})")
-        else:
+        # 5-tier classification based on overlap
+        if overlap >= 0.9:  # 90%+
+            return (1.0, f"Near-perfect ({overlap:.0%})")
+        elif overlap >= 0.7:  # 70-90%
+            return (0.75, f"Strong ({overlap:.0%})")
+        elif overlap >= 0.4:  # 40-70%
+            return (0.5, f"Medium progress ({overlap:.0%})")
+        elif overlap >= 0.2:  # 20-40%
+            return (0.25, f"Minimal progress ({overlap:.0%})")
+        else:  # < 20%
             return (0.0, f"Low overlap ({overlap:.0%})")
 
     # ==================== HELPER METHODS ====================

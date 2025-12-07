@@ -68,12 +68,12 @@ aflow_executor_model: "gpt-4o-mini"
 aflow_operator_descriptions_path: "config/aflow_operators.yaml"
 execution_timeout: 180
 
-# Reward System Configuration (Simplified 3-Tier)
+# Reward System Configuration (5-Tier with Clear Learning Gradient)
 reward_system:
-  tier_system: "3-tier"  # [0.0, 0.5, 1.0]
+  tier_system: "5-tier"  # [0.0, 0.25, 0.5, 0.75, 1.0]
   auto_fix: false        # No auto-fix - model must learn correct generation
-  fallback: false        # No fallback - errors → 0 reward
-  strict_validation: true # Strict mode - any error fails immediately
+  fallback: true         # Keep fallback as safety net for training stability
+  strict_validation: true # Strict mode - validation errors fail immediately
 
 # Experience Buffer
 experience_buffer:

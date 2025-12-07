@@ -22,7 +22,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from data_manager import DataManager
 from rl_workflow_generator import RLWorkflowGenerator
 from aflow_executor import AFlowExecutor
-from reward_computer_v2 import RewardComputer  # ✨ PHASE 1: NEW 5-tier reward system
+from reward_computer import RewardComputer
 from gpu_manager import GPUManager
 from experience_buffer import ExperienceBuffer
 from prompt_optimizer import PromptOptimizer
