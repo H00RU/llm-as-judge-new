@@ -1,182 +1,88 @@
-# GRPO Training Configuration
-# 深度融合AFlow + ROLL的在线学习框架
-
-# ============================================
 # Model Configuration
-# ============================================
-base_model: "/root/llm-as-judge-new/models/Qwen2.5-7B-Instruct"  # ✅ 完整的本地模型路径
-device_mapping: [0]      # GPU ID
-physical_gpus: [0]       # 实际物理GPU ID
-bf16: false              # 使用float16精度
-use_gradient_checkpointing: true  # ✅ FUNDAMENTAL FIX: Enable gradient checkpointing (trade compute for memory, reduces peak by 40-50%)
+base_model: "/root/llm-as-judge-new/models/Qwen2.5-7B-Instruct"
+device_mapping: [0]
+physical_gpus: [0]
+bf16: false
+use_gradient_checkpointing: true
 
-# ============================================
 # Training Parameters
-# ============================================
-# ✨ PHASE 3 OPTIMIZATION: Reduced K, optimized KL and gradient accumulation
 max_steps: 500
-rollout_batch_size: 4                 # ✨ 4 samples per batch
-num_return_sequences_in_group: 4      # ✨ 4 workflows per sample (Total: 4×4=16 workflows per step)
+rollout_batch_size: 4
+num_return_sequences_in_group: 4
 
-# Learning & Optimization - ✨ OPTIMIZED
+# Learning & Optimization
 learning_rate: 2.0e-5
 warmup_steps: 100
-gradient_accumulation_steps: 4        # ✨ PHASE 3: Changed 1→4 (Stabilize training, reduce OOM)
-forward_pass_microbatch_size: 1       # ✅ FUNDAMENTAL FIX: Process 1 workflow at a time during forward pass (prevents computation graph accumulation)
+gradient_accumulation_steps: 4
+forward_pass_microbatch_size: 1
 clip_range: 0.2
 max_grad_norm: 1.0
 weight_decay: 0.01
 use_kl_loss: true
-kl_loss_coef: 0.02                    # ✅ FIXED: Changed 0.005→0.02 (Conservative stability, prevent policy drift)
+kl_loss_coef: 0.02
 
-# ============================================
-# Temperature Scheduling - ✨ PHASE 3: ENABLED
-# ============================================
-# ✨ PHASE 3: Enable dynamic temperature for better exploration-exploitation tradeoff
+# Temperature Scheduling
 temperature_schedule:
-  enabled: true               # ✨ PHASE 3: Changed false→true (Enable temperature scheduling)
-  initial: 0.5                # Early training: Higher temp = Diverse exploration
-  final: 0.15                 # Late training: Lower temp = Focused exploitation
-  warmup_steps: 150           # Linear decrease: 0.5 → 0.15 over first 150 steps
+  enabled: true
+  initial: 0.5
+  final: 0.15
+  warmup_steps: 150
 
-# 生成配置（备用，当temperature_schedule.enabled=false时使用）
+# Generation Config (fallback when temperature_schedule disabled)
 generation_config:
   temperature: 0.2
-  max_tokens: 8192            # ⬆️ OPTIMIZED: 4096→8192 (Double context, GPU RAM available)
+  max_tokens: 8192
   top_p: 0.95
   top_k: 50
 
-# ============================================
 # LoRA Configuration
-# ============================================
 use_lora: true
-lora_rank: 128         # ⬆️ OPTIMIZED: 64→128 (Double LoRA expressiveness, GPU RAM available)
-lora_alpha: 128        # ⬆️ OPTIMIZED: 64→128 (Maintain alpha/rank = 1.0 ratio for scaling)
-lora_dropout: 0.05     # ✅ 改为0.05（参考reference）
-lora_target_modules: "q_proj,k_proj,v_proj,o_proj"  # ✅ 更新为reference的target modules
+lora_rank: 128
+lora_alpha: 128
+lora_dropout: 0.05
+lora_target_modules: "q_proj,k_proj,v_proj,o_proj"
 
-# ============================================
 # Data Configuration
-# ============================================
-data_dir: "data"      # 数据根目录，DataManager会自动查找mixed/{split}_mixed.jsonl
+data_dir: "data"
 train_dataset: "data/mixed/train_mixed.jsonl"
 test_dataset: "data/mixed/test_mixed.jsonl"
-
-# 域级别权重配置
 domain_ratios:
-  math: 0.4                 # 数学40%
-  qa: 0.3                   # QA30%
-  code: 0.3                 # Code30%
+  math: 0.4
+  qa: 0.3
+  code: 0.3
 
-# ============================================
-# Reward & Evaluation
-# ============================================
-# NOTE: reward_weights removed - not used by RewardComputerV2 (5-tier system)
+# Evaluation Strategy
+eval_every: 0  # Disabled to prevent test leakage
+val_samples: 50
+log_every: 5
+save_every: 20
 
-# 评估策略（无验证集设计）
-eval_every: 0               # 禁用在线测试集评估（避免测试集泄露）
-val_samples: 50             # 保留参数（最后手动评估时使用）
-log_every: 5                # 每5步记录训练指标
-save_every: 20              # 每20步保存checkpoint
-
-# ============================================
 # Checkpointing & Output
-# ============================================
 output_dir: "checkpoints/qwen25-7b/grpo_mixed"
 checkpointing:
   save_dir: "checkpoints/qwen25-7b/grpo_mixed"
 
-# ============================================
 # AFlow Configuration
-# ============================================
 aflow_config_path: "config/aflow_llm.yaml"
-aflow_executor_model: "gpt-4o-mini"             # ✅ 执行引擎：使用OpenAI官方gpt-4o-mini
+aflow_executor_model: "gpt-4o-mini"
 aflow_operator_descriptions_path: "config/aflow_operators.yaml"
-execution_timeout: 180                     # 执行超时（秒）
+execution_timeout: 180
 
-# ============================================
-# Experience Buffer (高质量样本存储)
-# ============================================
-# ✨ PHASE 1 UPDATE: Adjusted threshold for 5-tier system
+# Reward System Configuration (Simplified 3-Tier)
+reward_system:
+  tier_system: "3-tier"  # [0.0, 0.5, 1.0]
+  auto_fix: false        # No auto-fix - model must learn correct generation
+  fallback: false        # No fallback - errors → 0 reward
+  strict_validation: true # Strict mode - any error fails immediately
+
+# Experience Buffer
 experience_buffer:
   buffer_size: 100
-  reward_threshold: 0.4      # ✅ FIXED: Changed 0.7→0.4 (Include Tier 3+ samples for early training)
+  reward_threshold: 0.0  # Keep all experiences for learning from failures
   persistence_dir: "data/experience_buffer"
 
-# ============================================
-# Prompt Optimization (Layer 1)
-# ============================================
-prompt_optimizer:
-  enabled: true              # 启用动态提示词优化
-
-# ============================================
-# Operator Prompt Enhancement (Layer 2)
-# ============================================
-operator_prompt_enhancer:
-  enabled: true              # 启用Operator提示词增强
-
-# ============================================
 # W&B Monitoring
-# ============================================
 wandb:
   enabled: true
   project: "aflow-roll-integration"
   run_name: "grpo-500steps-4batch-4workflows-per-sample"
-  # api_key从环境变量读取: WANDB_API_KEY
-
-# ============================================
-# 训练说明 - ✨ PHASE 5 ROOT CAUSE FIX (根本性修复)
-# ============================================
-# 总样本数：500 steps × 4 batch × 4 workflows = 8,000 个工作流生成和执行
-#
-# ✨ ROOT CAUSE修复 (Phase 5 - 基于参考项目/content/llm-as-judge)：
-# 1. **移除错误的tensor删除** (_compute_log_prob_trainable):
-#    - PROBLEM: `del inputs, outputs` 破坏了梯度计算图
-#    - ROOT CAUSE: log_prob依赖这些张量，过早删除导致OOM（PyTorch重新分配内存）
-#    - SOLUTION: 让PyTorch自动管理tensor生命周期，backward()后自动释放
-# 2. **添加定期内存清理** (参考项目grpo_trainer.py:882,902-903):
-#    - 策略更新前: torch.cuda.empty_cache() + gc.collect()
-#    - 每5个样本: torch.cuda.empty_cache()
-# 3. **保持gradient checkpointing**: 减少前向传播内存 ~40%
-# 4. **保持micro-batching**: 防止梯度图过度累积
-#
-# 其他优化（Phase 1-4保留）：
-# 5. KL系数：0.1 → 0.02（稳定策略更新）
-# 6. K值：6 → 2（减少并发超时）
-# 7. 批次大小：4 → 5（增加样本多样性）
-# 8. 梯度累积：1 → 4（稳定训练）
-# 9. 温度调度：0.5→0.15（探索→开发）
-# 10. Experience buffer阈值：0.4（early training）
-#
-# 训练流程：
-# 1. 采样：batch_size=4，从mixed数据集（math:qa:code=4:3:3）均衡采样
-# 2. 生成：每个sample生成4个workflow（GRPO组，总16个/step）
-# 3. 执行：AFlow执行器运行workflows，超时180秒
-# 4. 奖励：RewardComputer v2计算5-tier奖励 [0.0, 0.2, 0.4, 0.7, 1.0]
-# 5. 更新：GRPO优化器使用低KL系数更新LoRA权重
-# 6. 验证：每5步记录指标，每20步保存checkpoint
-#
-# ✨ 关键配置：
-# ✨ max_steps: 500
-# ✨ rollout_batch_size: 4
-# ✨ num_return_sequences_in_group: 4（每个sample生成4个workflow）
-# ✨ kl_loss_coef: 0.02（稳定策略更新）
-# ✨ gradient_accumulation_steps: 4
-# ✨ temperature_schedule.enabled: true
-# ✨ temperature_schedule: 0.5→0.15 over 150 steps
-# ✨ experience_buffer.reward_threshold: 0.4（5-tier系统）
-# ✅ learning_rate: 2.0e-5（保持）
-# ✅ warmup_steps: 100（保持）
-# ⬆️ lora_rank: 64→128（GPU RAM优化）
-# ⬆️ max_tokens: 4096→8192（GPU RAM优化）
-# ✅ domain_ratios: math 40%, qa 30%, code 30%（保持均衡采样）
-#
-# ⚡ GPU优化说明：
-# • max_tokens: 4096→8192 → 允许生成更长的workflow代码，更好的context
-# • lora_rank: 64→128 → LoRA参数增加4倍，微调能力更强
-# • GPU内存预计：20GB→28-32GB（在40GB内仍有余量）
-#
-# 如需进一步优化（GPU还有余量），可考虑：
-# • num_return_sequences_in_group: 4→6 (需+8GB)
-# • rollout_batch_size: 4→5 或 4→6 (需大量VRAM，不推荐)
-# • gradient_accumulation_steps: 4→2 (加快训练但可能不稳定)
