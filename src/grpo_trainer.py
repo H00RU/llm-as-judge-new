@@ -256,12 +256,18 @@ class GRPOTrainer:
         # 7. AFlow执行器（传入operator_enhancer）
         print("\n⚙️  初始化AFlow执行器...")
         timeout = self.config.get('execution_timeout', 180)  # 默认180秒
+
+        # 读取fallback配置
+        fallback_enabled = self.config.get('reward_system', {}).get('fallback', True)
+
         self.executor = AFlowExecutor(
             llm_config_path=self.config['aflow_config_path'],
             timeout=timeout,
-            operator_enhancer=self.operator_enhancer  # 传递Layer 2增强器
+            operator_enhancer=self.operator_enhancer,  # 传递Layer 2增强器
+            enable_fallback=fallback_enabled  # 传递fallback配置
         )
         print(f"  执行超时: {timeout}秒")
+        print(f"  Fallback机制: {'启用' if fallback_enabled else '禁用'}")
 
         # 8. 奖励计算器 - ✨ PHASE 1: NEW 5-tier reward system
         print("\n🎯 初始化奖励计算器 (5-Tier System V2)...")

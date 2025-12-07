@@ -35,7 +35,8 @@ class AFlowExecutor:
         llm_config_path: str = "config/aflow_llm.yaml",
         llm_model_name: str = "gpt-4o-mini",
         timeout: int = 300,
-        operator_enhancer: Optional[Any] = None
+        operator_enhancer: Optional[Any] = None,
+        enable_fallback: bool = True
     ):
         """
         Args:
@@ -43,11 +44,13 @@ class AFlowExecutor:
             llm_model_name: 使用的LLM模型名称
             timeout: 执行超时时间（秒）
             operator_enhancer: Layer 2 operator提示词增强器（可选）
+            enable_fallback: 是否启用Fallback机制（安全网）
         """
         self.llm_config_path = Path(llm_config_path)
         self.llm_model_name = llm_model_name
         self.timeout = timeout
         self.operator_enhancer = operator_enhancer
+        self.enable_fallback = enable_fallback
         self.standardizer = ResponseStandardizer()  # 响应标准化器
 
         # 加载LLM配置
