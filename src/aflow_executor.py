@@ -11,15 +11,11 @@ from typing import Dict, Any, Tuple, Optional
 import asyncio
 import time
 
-# 导入工作流验证器、响应标准化器和SymPy修复器
+# 导入响应标准化器
 try:
-    from .workflow_validator_v2 import WorkflowValidatorV2
     from .response_standardizer import ResponseStandardizer
-    from .sympy_code_fixer import SymPyCodeFixer
 except ImportError:
-    from workflow_validator_v2 import WorkflowValidatorV2
     from response_standardizer import ResponseStandardizer
-    from sympy_code_fixer import SymPyCodeFixer
 
 # 添加AFlow到路径（添加多个可能需要的路径）
 aflow_path = os.getenv("AFLOW_PATH", "../AFlow")
@@ -31,151 +27,15 @@ from scripts.async_llm import create_llm_instance, LLMsConfig
 from scripts import operators as operator_module
 
 
-class AsyncOpenAILLMWrapper:
-    """
-    OpenAI 异步LLM包装器 - 作为Fallback备用LLM
-
-    实现AsyncLLM接口，与主LLM兼容的异步接口
-    当主LLM初始化失败时使用作为Tier 2备用方案
-    """
-
-    def __init__(self, api_key: str, model: str = "gpt-4o-mini",
-                 base_url: str = "https://api.openai.com/v1",
-                 temperature: float = 0.0, top_p: float = 1.0):
-        """
-        初始化OpenAI异步客户端
-
-        Args:
-            api_key: OpenAI API密钥
-            model: 使用的模型名称
-            base_url: API基础URL
-            temperature: 温度参数
-            top_p: top_p参数
-        """
-        try:
-            from openai import AsyncOpenAI
-        except ImportError:
-            raise ImportError("需要安装openai库: pip install openai")
-
-        self.api_key = api_key
-        self.model = model
-        self.base_url = base_url
-        self.temperature = temperature
-        self.top_p = top_p
-
-        # 初始化OpenAI异步客户端
-        self.client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url
-        )
-
-        # 跟踪使用统计
-        self._total_tokens = 0
-        self._total_input_tokens = 0
-        self._total_output_tokens = 0
-        self._total_cost = 0.0
-        self._call_count = 0
-
-    async def __call__(self, prompt: str, **kwargs) -> str:
-        """
-        调用OpenAI API生成响应
-
-        Args:
-            prompt: 输入提示词
-            **kwargs: 其他参数（被忽略以保持接口兼容）
-
-        Returns:
-            生成的响应文本
-        """
-        try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=self.temperature,
-                top_p=self.top_p,
-                max_tokens=2048
-            )
-
-            # 提取响应
-            answer = response.choices[0].message.content
-
-            # 跟踪使用统计
-            if hasattr(response, 'usage') and response.usage:
-                self._total_input_tokens += response.usage.prompt_tokens
-                self._total_output_tokens += response.usage.completion_tokens
-                self._total_tokens += response.usage.total_tokens
-
-                # 估算成本（gpt-4o-mini: $0.15/M input, $0.60/M output）
-                input_cost = (response.usage.prompt_tokens / 1_000_000) * 0.15
-                output_cost = (response.usage.completion_tokens / 1_000_000) * 0.60
-                cost = input_cost + output_cost
-                self._total_cost += cost
-
-            self._call_count += 1
-
-            return answer
-
-        except Exception as e:
-            print(f"❌ OpenAI API调用失败: {e}")
-            raise
-
-    async def call_with_format(self, prompt: str, formatter=None, **kwargs) -> str:
-        """
-        带格式化的调用（兼容性方法）
-
-        Args:
-            prompt: 输入提示词
-            formatter: 格式化器（可选）
-            **kwargs: 其他参数
-
-        Returns:
-            生成的响应文本
-        """
-        response = await self(prompt, **kwargs)
-
-        if formatter and callable(formatter):
-            try:
-                return formatter(response)
-            except Exception as e:
-                print(f"⚠️ 格式化失败: {e}")
-                return response
-
-        return response
-
-    def get_usage_summary(self) -> Dict[str, Any]:
-        """
-        获取使用统计摘要
-
-        Returns:
-            包含token和成本信息的字典
-        """
-        return {
-            "total_tokens": self._total_tokens,
-            "total_input_tokens": self._total_input_tokens,
-            "total_output_tokens": self._total_output_tokens,
-            "total_cost": self._total_cost,
-            "call_count": self._call_count
-        }
-
-    def reset_usage(self):
-        """重置使用统计"""
-        self._total_tokens = 0
-        self._total_input_tokens = 0
-        self._total_output_tokens = 0
-        self._total_cost = 0.0
-        self._call_count = 0
-
-
 class AFlowExecutor:
     """执行RL生成的工作流，使用AFlow的算子"""
 
     def __init__(
         self,
         llm_config_path: str = "config/aflow_llm.yaml",
-        llm_model_name: str = "gpt-4o-mini",  # 使用OpenAI官方gpt-4o-mini
+        llm_model_name: str = "gpt-4o-mini",
         timeout: int = 300,
-        operator_enhancer: Optional[Any] = None,
-        enable_fallback: bool = True  # 启用Fallback机制
+        operator_enhancer: Optional[Any] = None
     ):
         """
         Args:
@@ -183,16 +43,12 @@ class AFlowExecutor:
             llm_model_name: 使用的LLM模型名称
             timeout: 执行超时时间（秒）
             operator_enhancer: Layer 2 operator提示词增强器（可选）
-            enable_fallback: 是否启用Fallback机制
         """
         self.llm_config_path = Path(llm_config_path)
         self.llm_model_name = llm_model_name
         self.timeout = timeout
         self.operator_enhancer = operator_enhancer
-        self.enable_fallback = enable_fallback
-        self.validator_v2 = WorkflowValidatorV2()  # 统一验证器（支持reactive patching + TASK_PROMPT提取）
         self.standardizer = ResponseStandardizer()  # 响应标准化器
-        self.sympy_fixer = SymPyCodeFixer()  # SymPy修复器
 
         # 加载LLM配置
         self._load_llm_config()
@@ -244,6 +100,39 @@ class AFlowExecutor:
                 print(f"  默认配置也加载失败: {e2}")
                 # 最后的降级方案：设为 None，后续用字符串
                 self.llm_configs = None
+
+    def _basic_syntax_check(self, workflow_code: str) -> Tuple[bool, str]:
+        """
+        基础语法检查 - 只检查，不修复
+
+        检查内容：
+        - Python语法有效性
+        - 包含Workflow类定义
+        - 包含__call__方法
+
+        Args:
+            workflow_code: 工作流代码
+
+        Returns:
+            (is_valid, error_msg) 元组
+        """
+        try:
+            # 1. 检查Python语法
+            compile(workflow_code, '<string>', 'exec')
+
+            # 2. 检查必需结构
+            if 'class Workflow' not in workflow_code:
+                return False, "Missing 'class Workflow' definition"
+
+            if 'def __call__' not in workflow_code and 'async def __call__' not in workflow_code:
+                return False, "Missing '__call__' method in Workflow class"
+
+            return True, ""
+
+        except SyntaxError as e:
+            return False, f"Syntax error: {str(e)}"
+        except Exception as e:
+            return False, f"Validation error: {str(e)}"
 
     def _detect_code_leakage(self, answer: str, problem_type: str) -> bool:
         """
@@ -464,52 +353,19 @@ class AFlowExecutor:
             print(f"   → Will mark in metadata and apply penalty in reward")
             # 不raise异常 - 继续执行workflow，稍后在metadata中标记
 
-        # 1. 验证工作流代码
-        # 使用WorkflowValidatorV2进行reactive patching验证和修复
-        print(f"  1️⃣ 验证和修复工作流代码...")
-        fixed_code, is_valid, error_msg, fixes_applied = \
-            self.validator_v2.validate_and_fix_workflow(workflow_code, problem_type)
+        # 1. 基础语法检查（不修复任何问题）
+        print(f"  1️⃣ 验证工作流代码...")
+        is_valid, error_msg = self._basic_syntax_check(workflow_code)
 
-        workflow_code = fixed_code
-
-        # 记录修复和错误到元数据（给GRPO学习）
+        # 初始化元数据
         metadata = kwargs.get('metadata', {})
-        if fixes_applied:
-            metadata['auto_fixes_applied'] = fixes_applied
-            print(f"  ✅ 应用了以下修复: {fixes_applied}")
-
-        # 🆕 初始化参数降级计数器（Priority 2.1）
-        signature_downgrade_count = 0
 
         if not is_valid:
-            # 修复后仍然无效，才考虑降级
-            print(f"  ⚠️  工作流代码修复后仍然无效: {error_msg}")
+            # 代码无效，直接失败，不修复，不fallback
+            print(f"  ❌ 工作流代码无效: {error_msg}")
+            raise ValueError(f"Invalid workflow code: {error_msg}")
 
-            if self.enable_fallback:
-                print(f"  使用Fallback工作流")
-                # 标记这是因为验证失败而执行的 Fallback
-                answer, cost, fb_metadata = await self._execute_fallback_workflow(problem, problem_type, **kwargs)
-
-                # 合并元数据
-                metadata['validation_failed'] = True
-                metadata['validation_error'] = msg
-                metadata['needed_fallback'] = True  # 🔧 修复：统一key名称（从'fallback_used'改为'needed_fallback'）
-                metadata.update(fb_metadata)
-
-                return answer, cost, metadata
-            else:
-                # Fallback禁用，抛出异常
-                raise ValueError(f"工作流代码无效且Fallback已禁用: {msg}")
-
-        # 修复后有效，继续执行（不降级！）
-        print(f"  ✅ 代码验证通过（{len(fixes_applied)}个修复）")
-
-        # 2. 修复SymPy兼容性问题（针对Code类型）
-        if problem_type == "code" or 'sympy' in workflow_code.lower():
-            fixed_code, was_modified, fixes = self.sympy_fixer.fix_code(workflow_code)
-            if was_modified:
-                print(f"🔧 SymPy代码修复: {', '.join(fixes)}")
-                workflow_code = fixed_code
+        print(f"  ✅ 代码验证通过")
 
         try:
             # 创建临时工作流模块
@@ -523,128 +379,39 @@ class AFlowExecutor:
                 print(f"⚠️  llm_config 为 None，降级为字符串: {self.llm_model_name}")
                 llm_config = self.llm_model_name
 
-            try:
-                workflow = workflow_class(
-                    name="rl_generated_workflow",
-                    llm_config=llm_config,
-                    dataset=problem_type
-                )
-            except Exception as e:
-                # 工作流实例化失败，使用fallback
-                print(f"⚠️  工作流实例化失败: {e}")
-                import traceback
-                traceback.print_exc()
-                print(f"  使用fallback工作流")
-                fallback_class = self._get_fallback_workflow_class(problem_type)
-                workflow = fallback_class(
-                    name="fallback_workflow",
-                    llm_config=llm_config,
-                    dataset=problem_type
-                )
-                # 🔧 修复：记录实例化失败标记，后续如果成功需要记录needed_fallback
-                metadata['had_instantiation_error'] = True
+            # 实例化工作流
+            workflow = workflow_class(
+                name="rl_generated_workflow",
+                llm_config=llm_config,
+                dataset=problem_type
+            )
 
-            # 执行（带超时）
-            # 根本性修复：智能3级参数降级策略（参考项目方案）
+            # 执行（带超时）- 简化版，不降级参数
             try:
-                if problem_type == "code":
-                    # 策略1: 尝试传入所有3个参数 (problem, entry_point, test)
-                    if "entry_point" in kwargs and "test" in kwargs:
-                        try:
-                            print(f"  📋 尝试3参数模式: (problem, entry_point, test)")
-                            result = await asyncio.wait_for(
-                                workflow(problem, kwargs["entry_point"], kwargs["test"]),
-                                timeout=self.timeout
-                            )
-                            print(f"  ✅ 3参数模式成功")
-                        except TypeError as e:
-                            # 策略2: 降级到2参数 (problem, entry_point)
-                            if "positional argument" in str(e) or "missing" in str(e).lower():
-                                signature_downgrade_count += 1  # 🆕 记录降级
-                                print(f"  ⚠️  3参数失败，尝试2参数模式: (problem, entry_point)")
-                                try:
-                                    result = await asyncio.wait_for(
-                                        workflow(problem, kwargs["entry_point"]),
-                                        timeout=self.timeout
-                                    )
-                                    print(f"  ✅ 2参数模式成功")
-                                except TypeError as e2:
-                                    # 策略3: 降级到1参数 (problem only)
-                                    if "positional argument" in str(e2) or "missing" in str(e2).lower():
-                                        signature_downgrade_count += 1  # 🆕 记录降级
-                                        print(f"  ⚠️  2参数失败，降级到1参数模式: (problem)")
-                                        result = await asyncio.wait_for(
-                                            workflow(problem),
-                                            timeout=self.timeout
-                                        )
-                                        print(f"  ✅ 1参数模式成功")
-                                    else:
-                                        raise
-                            else:
-                                raise
-                    elif "entry_point" in kwargs:
-                        # 只有entry_point，没有test
-                        try:
-                            print(f"  📋 尝试2参数模式: (problem, entry_point)")
-                            result = await asyncio.wait_for(
-                                workflow(problem, kwargs["entry_point"]),
-                                timeout=self.timeout
-                            )
-                            print(f"  ✅ 2参数模式成功")
-                        except TypeError as e:
-                            if "positional argument" in str(e) or "missing" in str(e).lower():
-                                signature_downgrade_count += 1  # 🆕 记录降级
-                                print(f"  ⚠️  2参数失败，降级到1参数模式: (problem)")
-                                result = await asyncio.wait_for(
-                                    workflow(problem),
-                                    timeout=self.timeout
-                                )
-                                print(f"  ✅ 1参数模式成功")
-                            else:
-                                raise
-                    else:
-                        # 没有entry_point，直接用1参数
-                        print(f"  📋 使用1参数模式: (problem)")
-                        result = await asyncio.wait_for(
-                            workflow(problem),
-                            timeout=self.timeout
-                        )
-                        print(f"  ✅ 1参数模式成功")
+                if problem_type == "code" and "entry_point" in kwargs:
+                    print(f"  📋 执行CODE workflow: (problem, entry_point)")
+                    result = await asyncio.wait_for(
+                        workflow(problem, kwargs["entry_point"]),
+                        timeout=self.timeout
+                    )
                 else:
-                    # Non-code problems (Math/QA) - 仅传problem参数
-                    print(f"  📋 {problem_type.upper()}问题使用1参数模式: (problem)")
+                    # Math/QA problems or code without entry_point
+                    print(f"  📋 执行{problem_type.upper()} workflow: (problem)")
                     result = await asyncio.wait_for(
                         workflow(problem),
                         timeout=self.timeout
                     )
-                    print(f"  ✅ 执行成功")
+                print(f"  ✅ 执行成功")
             except Exception as e:
-                # 捕获所有异常（operator执行失败）
+                # 捕获所有异常（operator执行失败）- 直接失败，不fallback
                 print(f"  ❌ Workflow执行异常: {type(e).__name__}")
                 print(f"     异常信息: {str(e)}")
+                import traceback
+                print(f"  完整堆栈:")
+                traceback.print_exc()
 
-                # 快速处理Test算子的已知问题
-                if "'NoneType' object is not iterable" in str(e) and "test_cases" in str(e):
-                    print(f"  🚀 检测到Test算子None问题，快速切换到Fallback")
-                    import traceback
-                else:
-                    import traceback
-                    print(f"  完整堆栈:")
-                    traceback.print_exc()
-
-                # 检查是否启用Fallback
-                if self.enable_fallback:
-                    print(f"  🔄 尝试使用Fallback机制")
-                    # 🔧 修复：合并fallback metadata并记录needed_fallback标记
-                    answer, cost, fb_metadata = await self._execute_fallback_workflow(problem, problem_type, **kwargs)
-                    metadata['needed_fallback'] = True
-                    metadata['fallback_type'] = 'operator_error'
-                    metadata.update(fb_metadata)
-                    return answer, cost, metadata
-                else:
-                    print(f"  ⚠️  Fallback已禁用，直接抛出异常")
-                    # 直接抛出异常而不是使用fallback
-                    raise
+                # 直接抛出异常，不使用fallback
+                raise
 
             # 安全地解包结果（可能返回2个或更多值）
             if isinstance(result, tuple):
@@ -671,32 +438,18 @@ class AFlowExecutor:
 
             execution_time = time.time() - start_time
 
-            # ✨ FIX 2: 空答案检测与Fallback触发（来自参考项目）
-            # 问题：Workflow可能返回None或空字符串，导致训练污染
+            # 空答案检测 - 直接返回0奖励，不fallback
             if answer is None or (isinstance(answer, str) and not answer.strip()):
-                print(f"  🚨 检测到空答案（None或空字符串）")
-
-                if self.enable_fallback:
-                    print(f"  🔄 触发Fallback机制以处理空答案")
-                    # 🔧 修复：合并fallback metadata并记录needed_fallback标记
-                    answer, cost, fb_metadata = await self._execute_fallback_workflow(problem, problem_type, **kwargs)
-                    metadata['needed_fallback'] = True
-                    metadata['fallback_type'] = 'empty_answer'
-                    metadata.update(fb_metadata)
-                    return answer, cost, metadata
-                else:
-                    print(f"  ⚠️  Fallback已禁用，返回空答案")
-                    metadata = {
-                        "success": False,
-                        "error": "empty_answer",
-                        "error_type": "empty_answer",  # 新增（方案B）：明确错误类型
-                        "execution_time": execution_time,
-                        "cost": cost,
-                        "problem_type": problem_type,
-                        "validation_failed": False,
-                        "fallback_executed": False
-                    }
-                    return None, 0.0, metadata
+                print(f"  🚨 检测到空答案（None或空字符串）- 直接失败")
+                metadata = {
+                    "success": False,
+                    "error": "empty_answer",
+                    "error_type": "empty_answer",
+                    "execution_time": execution_time,
+                    "cost": cost,
+                    "problem_type": problem_type
+                }
+                return None, 0.0, metadata
 
             # ✨ FIX 3: 答案模式清理（来自参考项目）
             # 问题：某些LLM可能在答案前添加解释性文本，如"Based on feedback..."、"Revised Solution:"等
@@ -704,63 +457,32 @@ class AFlowExecutor:
             if isinstance(answer, str):
                 answer = self._clean_answer(answer)
 
-            # ✨ FIX 4: 代码泄露检测（来自参考项目）
-            # 问题：Programmer 算子可能返回源代码而非执行结果（特别是对代码问题）
-            # 此时应触发 fallback 而不是返回源代码
+            # 代码泄露检测 - 直接返回0奖励，不fallback
             if self._detect_code_leakage(answer, problem_type):
-                print(f"  🚨 检测到代码泄露（Programmer返回了源代码而非执行结果）")
-
-                if self.enable_fallback:
-                    print(f"  🔄 触发Fallback机制以处理代码泄露")
-                    # 🔧 修复：合并fallback metadata并记录needed_fallback标记
-                    answer, cost, fb_metadata = await self._execute_fallback_workflow(problem, problem_type, **kwargs)
-                    metadata['needed_fallback'] = True
-                    metadata['fallback_type'] = 'code_leakage'
-                    metadata.update(fb_metadata)
-                    return answer, cost, metadata
-                else:
-                    print(f"  ⚠️  Fallback已禁用，返回源代码")
-                    metadata = {
-                        "success": False,
-                        "error": "code_leakage",
-                        "error_type": "code_leakage",  # 新增（方案B）：明确错误类型
-                        "execution_time": execution_time,
-                        "cost": cost,
-                        "problem_type": problem_type,
-                        "validation_failed": False,
-                        "fallback_executed": False
-                    }
-                    return None, 0.0, metadata
-
-            # 元数据（方案B：添加operator_problem_type_mismatch标记用于soft learning）
-            # 🔧 修复：检查是否存在had_instantiation_error标记，如果有则添加needed_fallback
-            if not metadata.get('had_instantiation_error', False):
-                # 正常流程：更新metadata（保留之前的had_signature_error等标志！）
-                metadata.update({
-                    "success": True,
+                print(f"  🚨 检测到代码泄露（Programmer返回了源代码而非执行结果）- 直接失败")
+                metadata = {
+                    "success": False,
+                    "error": "code_leakage",
+                    "error_type": "code_leakage",
                     "execution_time": execution_time,
                     "cost": cost,
-                    "problem_type": problem_type,
-                    "validation_failed": False,
-                    "fallback_executed": False,
-                    # 新增（方案B）：标记operator-problem type匹配情况
-                    "operator_problem_type_mismatch": mismatch_detected,
-                    "mismatch_type": mismatch_details.split('\n')[0] if mismatch_details else None,
-                    "signature_downgrade_count": signature_downgrade_count  # 🆕 添加降级计数
-                })
-            else:
-                # 实例化失败但最终成功的流程：保留had_instantiation_error，添加needed_fallback
-                metadata['success'] = True
-                metadata['needed_fallback'] = True  # 🔧 标记：虽然最终成功，但生成的代码无法实例化
-                metadata['fallback_type'] = 'instantiation_error'
-                metadata['execution_time'] = execution_time
-                metadata['operator_problem_type_mismatch'] = mismatch_detected
-                metadata['mismatch_type'] = mismatch_details.split('\n')[0] if mismatch_details else None
-                metadata['signature_downgrade_count'] = signature_downgrade_count  # 🆕 添加降级计数
+                    "problem_type": problem_type
+                }
+                return None, 0.0, metadata
+
+            # 元数据
+            metadata.update({
+                "success": True,
+                "execution_time": execution_time,
+                "cost": cost,
+                "problem_type": problem_type,
+                "operator_problem_type_mismatch": mismatch_detected,
+                "mismatch_type": mismatch_details.split('\n')[0] if mismatch_details else None
+            })
 
             if mismatch_detected:
                 print(f"  ⚠️  Workflow violates operator-problem constraint")
-                print(f"     This will be penalized (-5.0) in training reward")
+                print(f"     This will be penalized in training reward")
 
             return answer, cost, metadata
 
@@ -773,10 +495,7 @@ class AFlowExecutor:
                 "error": "timeout",
                 "execution_time": execution_time,
                 "cost": 0.0,
-                "problem_type": problem_type,
-                "validation_failed": False,  # 🔴 新增：工作流通过验证，但执行超时了
-                "fallback_executed": False,
-                "signature_downgrade_count": signature_downgrade_count  # 🆕 添加降级计数
+                "problem_type": problem_type
             }
 
             return None, 0.0, metadata
@@ -793,29 +512,17 @@ class AFlowExecutor:
                 "error": str(e),
                 "execution_time": execution_time,
                 "cost": 0.0,
-                "problem_type": problem_type,
-                "validation_failed": False,  # 🔴 新增：工作流通过验证，但执行失败了
-                "fallback_executed": False,
-                "signature_downgrade_count": signature_downgrade_count  # 🆕 添加降级计数
+                "problem_type": problem_type
             }
 
             return None, 0.0, metadata
 
     def _create_workflow_class(self, workflow_code: str, problem_type: str):
         """
-        从工作流代码动态创建Workflow类，支持TASK_PROMPT注入
+        从工作流代码动态创建Workflow类
 
-        设计：
-        1. 提取TASK_PROMPT变量（如果存在）
-        2. 创建基础工作流类
-        3. 如果有TASK_PROMPT，创建EnhancedWorkflow包装器自动注入
+        直接执行代码创建类，不进行任何修复或fallback
         """
-
-        # 1. 提取TASK_PROMPT（可选）
-        task_prompt = self.validator_v2.extract_task_prompt(workflow_code)
-        if task_prompt:
-            print(f"📝 检测到TASK_PROMPT，将在执行时注入")
-
         # 准备命名空间
         namespace = {
             "operator": operator_module,
@@ -824,7 +531,6 @@ class AFlowExecutor:
         }
 
         # 替换import路径（使workspace路径可用）
-        # 这里简化处理，直接使用scripts中的operator
         modified_code = workflow_code.replace(
             f"import workspace.{problem_type}.workflows.template.operator as operator",
             "# operator already imported"
@@ -834,52 +540,14 @@ class AFlowExecutor:
         modified_code = modified_code.replace("async_lll", "async_llm")
         modified_code = modified_code.replace("create_lll_instance", "create_llm_instance")
 
-        try:
-            # 2. 执行代码创建基础类
-            exec(modified_code, namespace)
+        # 执行代码创建类
+        exec(modified_code, namespace)
 
-            # 返回Workflow类
-            if "Workflow" not in namespace:
-                raise ValueError("No Workflow class found in generated code")
+        # 返回Workflow类
+        if "Workflow" not in namespace:
+            raise ValueError("No Workflow class found in generated code")
 
-            base_class = namespace["Workflow"]
-
-            # 3. 如果有TASK_PROMPT，创建EnhancedWorkflow包装器
-            if task_prompt:
-                class EnhancedWorkflow:
-                    """自动注入TASK_PROMPT的包装器"""
-                    def __init__(self, name: str, llm_config, dataset):
-                        self.base_workflow = base_class(name, llm_config, dataset)
-                        self.task_prompt = task_prompt
-                        self.llm = self.base_workflow.llm
-
-                    async def __call__(self, problem: str, *args, **kwargs):
-                        """
-                        自动在问题前注入TASK_PROMPT
-
-                        Args:
-                            problem: 原始问题文本
-                            *args, **kwargs: 传递给基础工作流的其他参数（如entry_point, test）
-
-                        Returns:
-                            (answer, cost) 元组
-                        """
-                        # 注入TASK_PROMPT到问题前面
-                        enhanced_problem = f"{self.task_prompt}\n\n{problem}"
-                        return await self.base_workflow(enhanced_problem, *args, **kwargs)
-
-                return EnhancedWorkflow
-            else:
-                return base_class
-
-        except Exception as e:
-            print(f"⚠️  生成的工作流代码有错误: {e}")
-            print(f"  使用默认fallback工作流")
-            import traceback
-            traceback.print_exc()
-
-            # 使用简单的默认工作流作为fallback
-            return self._get_fallback_workflow_class(problem_type)
+        return namespace["Workflow"]
 
     def _get_llm_config(self):
         """获取LLM配置（确保返回正确类型）"""
@@ -913,354 +581,6 @@ class AFlowExecutor:
             print(f"  降级为字符串模式: {self.llm_model_name}")
             return self.llm_model_name
 
-    def _create_qa_fallback_workflow(self) -> str:
-        """
-        创建 QA 专用 Fallback 工作流代码
-
-        特点：
-        - 仅使用 Custom 操作符，不使用 Test
-        - 特别针对 QA 问题的指令
-        - 不处理 entry_point 参数（QA 不需要）
-        """
-        return '''
-import asyncio
-
-class Workflow:
-    def __init__(self, name, llm_config, dataset):
-        self.name = name
-        self.dataset = dataset
-        self.model = create_llm_instance(llm_config)
-        self.custom = operator.Custom(self.model)
-
-    async def __call__(self, problem, entry_point=None, test=None):
-        """QA Fallback 工作流：使用 Custom 操作符生成答案，不使用 Test"""
-        instruction = "Answer this question comprehensively. Provide the final answer clearly."
-        result = await self.custom(input=problem, instruction=instruction)
-
-        # 安全提取响应
-        if isinstance(result, dict):
-            response = result.get("response", "")
-        else:
-            response = str(result)
-
-        # 获取成本
-        try:
-            cost = self.model.get_usage_summary().get("total_cost", 0.0)
-        except:
-            cost = 0.0
-
-        return response, cost
-'''
-
-    async def _execute_fallback_workflow(
-        self,
-        problem: str,
-        problem_type: str,
-        **kwargs
-    ) -> Tuple[Any, float, Dict]:
-        """
-        执行Fallback工作流
-
-        使用最简单但可靠的方式执行
-        """
-        print(f"🔄 执行Fallback工作流（类型: {problem_type}）")
-        start_time = time.time()
-
-        try:
-            # 根据问题类型选择 Fallback 工作流
-            if problem_type == "qa":
-                # QA 专用 Fallback：避免 Test 操作符
-                simple_workflow_code = self._create_qa_fallback_workflow()
-                print(f"  ℹ️  使用 QA 专用 Fallback（不包含 Test 操作符）")
-            else:
-                # 通用 Fallback（用于 code 和 math）
-                if problem_type == "code":
-                    func_signature = ", entry_point"
-                else:
-                    func_signature = ""
-
-                simple_workflow_code = f'''
-import asyncio
-
-class Workflow:
-    def __init__(self, name, llm_config, dataset):
-        self.name = name
-        self.dataset = dataset
-        self.model = create_llm_instance(llm_config)
-        self.custom = operator.Custom(self.model)
-
-    async def __call__(self, problem{func_signature}):
-        """Simple fallback workflow using only Custom operator"""
-
-        # Use Custom operator with appropriate instruction
-        if self.dataset == "code":
-            instruction = "Solve this coding problem. Provide a complete Python solution."
-        elif self.dataset == "math":
-            instruction = "Solve this math problem step by step. Show your work and provide the final answer."
-        else:
-            instruction = "Answer this question comprehensively."
-
-        result = await self.custom(input=problem, instruction=instruction)
-
-        # Validate and extract response
-        if isinstance(result, dict):
-            response = result.get("response", "")
-        else:
-            response = str(result)
-
-        # Get cost
-        try:
-            cost = self.model.get_usage_summary().get("total_cost", 0.0)
-        except:
-            cost = 0.0
-
-        return response, cost
-'''
-
-            # 创建工作流类
-            workflow_class = self._create_workflow_class(simple_workflow_code, problem_type)
-
-            # 实例化
-            llm_config = self._get_llm_config()
-            workflow = workflow_class(
-                name="fallback_workflow",
-                llm_config=llm_config,
-                dataset=problem_type
-            )
-
-            # 执行
-            if problem_type == "code" and "entry_point" in kwargs:
-                result = await asyncio.wait_for(
-                    workflow(problem, kwargs["entry_point"]),
-                    timeout=self.timeout
-                )
-            else:
-                result = await asyncio.wait_for(
-                    workflow(problem),
-                    timeout=self.timeout
-                )
-
-            # 解包结果
-            if isinstance(result, tuple) and len(result) >= 2:
-                answer, cost = result[0], result[1]
-            else:
-                answer, cost = result, 0.0
-
-            execution_time = time.time() - start_time
-
-            metadata = {
-                "success": True,
-                "needed_fallback": True,  # 🔧 修复：统一key名称（从'fallback_used'改为'needed_fallback'）
-                "execution_time": execution_time,
-                "cost": cost,
-                "problem_type": problem_type
-            }
-
-            print(f"✅ Fallback成功 (耗时: {execution_time:.2f}秒)")
-            return answer, cost, metadata
-
-        except Exception as e:
-            execution_time = time.time() - start_time
-            print(f"❌ Fallback也失败了: {e}")
-
-            metadata = {
-                "success": False,
-                "needed_fallback": True,  # 🔧 修复：统一key名称（从'fallback_used'改为'needed_fallback'）
-                "error": str(e),
-                "execution_time": execution_time,
-                "cost": 0.0,
-                "problem_type": problem_type
-            }
-
-            # 返回空结果而不是抛出异常
-            return "", 0.0, metadata
-
-    def _get_fallback_workflow_class(self, problem_type: str):
-        """返回一个简单的默认工作流类（用于生成失败时）
-
-        改进的fallback策略：
-        1. 先尝试直接调用LLM生成解决方案
-        2. 如果失败，返回占位符而不是None
-        3. 避免依赖可能失败的Test operator
-        """
-        # 保存llm_config_path供FallbackWorkflow使用
-        llm_config_path = self.llm_config_path
-
-        class FallbackWorkflow:
-            def __init__(self, name: str, llm_config, dataset):
-                self.name = name
-                self.dataset = dataset
-
-                # L1.2: 3-tier LLM 初始化降级机制（增强可靠性）
-                try:
-                    # Tier 1: 尝试主 LLM 初始化
-                    self.model = create_llm_instance(llm_config)
-                    print(f"✅ LLM 初始化成功（主 LLM）")
-                except Exception as e:
-                    print(f"⚠️  主 LLM 初始化失败: {e}")
-
-                    # Tier 2: 使用 OpenAI 备用 LLM
-                    try:
-                        print(f"  尝试使用 OpenAI 备用 LLM...")
-                        import os
-                        import yaml
-
-                        api_key = None
-
-                        # 策略1: 从环境变量获取
-                        api_key = os.getenv("OPENAI_API_KEY")
-
-                        # 策略2: 从YAML配置文件读取
-                        if not api_key:
-                            try:
-                                config_path = Path(llm_config_path).absolute()
-                                if config_path.exists():
-                                    with open(config_path, 'r') as f:
-                                        config_data = yaml.safe_load(f)
-                                        model_config = config_data.get('models', {}).get('gpt-4o-mini', {})
-                                        api_key = model_config.get('api_key')
-
-                                        # 如果是环境变量引用（如 ${OPENAI_API_KEY}），解析它
-                                        if api_key and api_key.startswith('${') and api_key.endswith('}'):
-                                            env_var_name = api_key[2:-1]
-                                            api_key = os.getenv(env_var_name)
-                                        elif api_key and api_key.startswith('$'):
-                                            env_var_name = api_key[1:]
-                                            api_key = os.getenv(env_var_name)
-                            except Exception as e_yaml:
-                                print(f"    ⚠️  无法读取YAML配置: {e_yaml}")
-
-                        # 策略3: 如果llm_config是dict，尝试从中提取
-                        if not api_key and isinstance(llm_config, dict):
-                            api_key = llm_config.get('api_key')
-
-                        if api_key and not api_key.startswith('$'):
-                            # API Key 可用，使用 OpenAI 备用
-                            self.model = AsyncOpenAILLMWrapper(api_key=api_key)
-                            print(f"✅ OpenAI 备用 LLM 初始化成功")
-                        else:
-                            # 没有有效的 API Key，进入 Tier 3
-                            raise ValueError(f"无有效的 OpenAI API Key (api_key={api_key})")
-
-                    except Exception as e2:
-                        print(f"⚠️  OpenAI 备用 LLM 初始化失败: {e2}")
-
-                        # Tier 3: 最后降级为 None
-                        self.model = None
-                        print(f"⚠️  LLM 初始化完全失败，将使用占位符返回")
-
-            @staticmethod
-            def _safe_extract_response(result):
-                """
-                L1.3: 安全提取响应，处理多种返回格式
-
-                支持的格式：
-                - dict: 查找 'response' / 'answer' / 'solution' 键
-                - tuple: 取第一个元素
-                - str: 直接返回
-                - None: 返回空字符串
-                """
-                if result is None:
-                    return ""
-
-                # 处理字典格式
-                if isinstance(result, dict):
-                    # 尝试多个可能的键
-                    response = (result.get('response') or
-                               result.get('answer') or
-                               result.get('solution') or
-                               str(result))
-                    return response if response else ""
-
-                # 处理元组格式
-                elif isinstance(result, tuple):
-                    return str(result[0]) if result and result[0] is not None else ""
-
-                # 处理字符串格式
-                elif isinstance(result, str):
-                    return result
-
-                # 其他格式：转为字符串
-                else:
-                    return str(result) if result else ""
-
-            async def __call__(self, problem: str, *args, **kwargs):
-                """改进的fallback：不依赖Test operator"""
-
-                # 策略1: 直接调用LLM生成，不经过任何operator
-                if self.model is not None:
-                    try:
-                        print(f"  📝 Fallback: 直接调用LLM生成解决方案")
-
-                        # 根据问题类型选择合适的prompt
-                        if self.dataset == "code":
-                            prompt = f"""Given the following coding problem, provide a Python solution.
-
-Problem:
-{problem}
-
-Provide ONLY the Python function code, no explanations."""
-                        else:
-                            prompt = f"""Solve the following problem step by step and provide the final answer.
-
-Problem:
-{problem}
-
-Provide the final answer clearly."""
-
-                        # 🔴 修复: 使用正确的 AsyncLLM 接口
-                        # AsyncLLM 的方法是 __call__(prompt) 而不是 agenerate(messages=[...])
-                        response = await self.model(prompt)
-
-                        if response:
-                            usage = self.model.get_usage_summary()
-                            if isinstance(usage, dict) and "total_cost" in usage:
-                                cost = usage["total_cost"]
-                            else:
-                                cost = 0.0
-
-                            # L1.3: 使用安全提取方法获取响应
-                            # response 可能是字符串或字典，需要处理
-                            if isinstance(response, dict):
-                                answer = response.get('response', str(response))
-                            else:
-                                answer = str(response)
-                            return answer, cost
-
-                    except Exception as e:
-                        print(f"  ⚠️  Fallback直接调用LLM失败: {e}")
-
-                # 策略2: 如果LLM调用也失败，使用Custom operator但不依赖Test
-                # 🔴 修复: 只在 self.model 不是 None 时才尝试
-                if self.model is not None:
-                    try:
-                        print(f"  📝 Fallback: 尝试使用Custom operator")
-                        custom = operator_module.Custom(self.model)
-                        result = await custom(
-                            input=problem,
-                            instruction="Generate a solution without requiring test validation."
-                        )
-
-                        if result:
-                            # L1.3: 使用安全提取方法获取响应
-                            response_text = self._safe_extract_response(result)
-                            if response_text:
-                                usage = self.model.get_usage_summary()
-                                if isinstance(usage, dict) and "total_cost" in usage:
-                                    cost = usage["total_cost"]
-                                else:
-                                    cost = 0.0
-                                return response_text, cost
-
-                    except Exception as e:
-                        print(f"  ⚠️  Fallback Custom operator失败: {e}")
-
-                # 策略3: 所有策略都失败，返回占位符而不是None
-                print(f"  ⚠️  所有fallback策略都失败，返回占位符")
-                placeholder = f"[Fallback placeholder for problem: {problem[:80]}...]"
-                return placeholder, 0.0
-
-        return FallbackWorkflow
 
 
 async def test_executor():
