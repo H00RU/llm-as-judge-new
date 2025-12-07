@@ -53,6 +53,10 @@ class AFlowExecutor:
         self.enable_fallback = enable_fallback
         self.standardizer = ResponseStandardizer()  # 响应标准化器
 
+        # 初始化工作流验证器（增强版，包含一致性检查）
+        from .workflow_validator import WorkflowValidator
+        self.validator = WorkflowValidator()
+
         # 加载LLM配置
         self._load_llm_config()
 
@@ -189,6 +193,27 @@ class AFlowExecutor:
                 return True
 
         return False
+
+    def _get_learning_point(self, error: Exception) -> str:
+        """根据错误类型提供学习点"""
+        error_str = str(error).lower()
+        error_type = type(error).__name__
+
+        if error_type == 'AttributeError':
+            if 'has no attribute' in error_str:
+                return 'Operator导入-初始化-使用不一致：确保使用的operator已导入并初始化'
+            else:
+                return '检查operator属性访问是否正确'
+        elif error_type == 'ImportError':
+            return '导入错误：检查operator导入语句是否正确'
+        elif error_type == 'NameError':
+            return '名称错误：检查变量名是否定义'
+        elif error_type == 'TypeError':
+            return '类型错误：检查operator参数和调用方式'
+        elif 'timeout' in error_str:
+            return '执行超时：可能需要优化workflow逻辑'
+        else:
+            return f'执行错误：{error_type} - 需要检查workflow代码逻辑'
 
     def _clean_answer(self, answer: str) -> str:
         """
@@ -356,19 +381,33 @@ class AFlowExecutor:
             print(f"   → Will mark in metadata and apply penalty in reward")
             # 不raise异常 - 继续执行workflow，稍后在metadata中标记
 
-        # 1. 基础语法检查（不修复任何问题）
-        print(f"  1️⃣ 验证工作流代码...")
-        is_valid, error_msg = self._basic_syntax_check(workflow_code)
+        # 1. 增强验证检查（包含operator一致性）
+        print(f"  1️⃣ 验证工作流代码和operator一致性...")
+        validated_code, is_valid, error_msg, fixes_applied = self.validator.validate_and_fix_workflow(
+            workflow_code, problem_type
+        )
 
         # 初始化元数据
         metadata = kwargs.get('metadata', {})
 
-        if not is_valid:
-            # 代码无效，直接失败，不修复，不fallback
-            print(f"  ❌ 工作流代码无效: {error_msg}")
-            raise ValueError(f"Invalid workflow code: {error_msg}")
+        # 设置validation_metadata到metadata中，供reward_computer使用
+        validation_metadata = {
+            'is_consistent': is_valid,
+            'consistency_errors': [error_msg] if error_msg else [],
+            'original_code': workflow_code,
+            'validated_code': validated_code,
+            'was_fixed': len(fixes_applied) > 0 if fixes_applied else False
+        }
+        metadata['validation_metadata'] = validation_metadata
 
-        print(f"  ✅ 代码验证通过")
+        if not is_valid:
+            # 代码不一致，记录错误但仍执行原始代码
+            print(f"  ❌ 工作流验证失败: {error_msg}")
+            print(f"  ⚠️ 将执行原始代码，Qwen需从错误中学习")
+            workflow_code = workflow_code  # 使用Qwen生成的原始代码
+        else:
+            print(f"  ✅ 代码验证和一致性检查通过")
+            workflow_code = validated_code  # 使用验证后的代码
 
         try:
             # 创建临时工作流模块
@@ -406,14 +445,43 @@ class AFlowExecutor:
                     )
                 print(f"  ✅ 执行成功")
             except Exception as e:
-                # 捕获所有异常（operator执行失败）- 直接失败，不fallback
+                # 捕获所有异常（operator执行失败）- 记录真实错误
                 print(f"  ❌ Workflow执行异常: {type(e).__name__}")
                 print(f"     异常信息: {str(e)}")
+
+                # 记录真实的执行错误到metadata，用于reward计算
+                execution_error = {
+                    'type': type(e).__name__,
+                    'message': str(e),
+                    'learning_point': self._get_learning_point(e)
+                }
+
+                # 检查是否是AttributeError（operator一致性问题）
+                if isinstance(e, AttributeError):
+                    print(f"  🔍 检测到AttributeError：可能是operator导入-初始化-使用不一致")
+                    execution_error['is_consistency_error'] = True
+                    execution_error['learning_point'] = 'Operator导入-初始化-使用必须一致'
+
+                # 将执行错误信息添加到metadata中
+                metadata['execution_error'] = execution_error
+
                 import traceback
                 print(f"  完整堆栈:")
                 traceback.print_exc()
 
-                # 直接抛出异常，不使用fallback
+                # 触发执行级fallback（如果启用）
+                if self.enable_fallback:
+                    print(f"  🔄 触发执行级fallback安全网")
+                    try:
+                        return await self._execute_fallback_workflow(
+                            workflow_code, problem, problem_type, **kwargs
+                        )
+                    except Exception as fallback_error:
+                        print(f"  ❌ Fallback也失败了: {fallback_error}")
+                        metadata['fallback_failed'] = True
+                        metadata['fallback_error'] = str(fallback_error)
+
+                # 如果没有fallback或fallback失败，抛出异常
                 raise
 
             # 安全地解包结果（可能返回2个或更多值）

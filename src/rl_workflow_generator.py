@@ -145,7 +145,7 @@ class RLWorkflowGenerator:
     def _build_generation_prompt(self, problem: str, problem_type: str) -> str:
         """Generate workflow prompt in clean XML format"""
 
-        # Base prompt with XML structure and operator definitions
+        # Base prompt with strong operator consistency constraints
         base_prompt = f"""You are building a Workflow to solve {problem_type} problems.
 
 You MUST output in the following XML format:
@@ -158,9 +158,10 @@ You MUST output in the following XML format:
             self.name = name
             self.dataset = dataset
             self.llm = create_llm_instance(llm_config)
-            # Initialize operators you will use
+            # CRITICAL: Initialize exactly the operators you import
 
         async def __call__(self, problem: str, entry_point: str = "solve"):
+            # CRITICAL: Only use operators you initialized
             # Chain operators and return (answer, cost) tuple
             result = await self.operator(input, instruction)
             return final_answer, self.llm.get_usage_summary()["total_cost"]
@@ -181,13 +182,69 @@ Review(problem: str, solution: str) -> {{'review_result': bool, 'feedback': str}
 Revise(problem: str, solution: str, feedback: str) -> {{'solution': str}}
 ScEnsemble(solutions: List[str], problem: str) -> {{'response': str}}
 
-## Core Rules
-- Use .get('key', default) for safe dictionary access
-- Always return (answer, cost) tuple
-- Initialize all operators before using
-- Import only operators you actually use"""
+## Operator Consistency Rules (CRITICAL)
+**MANDATORY REQUIREMENTS - NO EXCEPTIONS:**
+1. Every operator used in __call__ MUST be imported
+2. Every imported operator MUST be initialized in __init__
+3. Every initialized operator MUST be used in __call__
+4. Imports and initializations MUST match exactly
+5. Violations will result in Tier 1 (0.0) reward
 
-        # Problem-type-specific constraints
+## Common Pitfalls (CRITICAL - AVOID THESE)
+
+❌ WRONG - Missing import:
+```python
+class Workflow:
+    def __init__(self, name, llm_config, dataset):
+        self.revise = Revise(self.llm)
+    async def __call__(self, problem):
+        return await self.revise(...)  # ← ImportError!
+```
+
+❌ WRONG - Missing initialization:
+```python
+from scripts.operators import Revise
+class Workflow:
+    def __init__(self, name, llm_config, dataset):
+        # self.revise = Revise(self.llm)  # ← Missing!
+    async def __call__(self, problem):
+        return await self.revise(...)  # ← AttributeError!
+```
+
+❌ WRONG - Unused operator:
+```python
+from scripts.operators import Revise
+class Workflow:
+    def __init__(self, name, llm_config, dataset):
+        self.revise = Revise(self.llm)  # ← Never used!
+    async def __call__(self, problem):
+        return await self.answer_generate(...)  # ← Resource waste
+```
+
+✅ CORRECT - Import-Initialize-Use Consistency:
+```python
+from scripts.operators import AnswerGenerate, Revise
+class Workflow:
+    def __init__(self, name, llm_config, dataset):
+        self.answer_generate = AnswerGenerate(self.llm)
+        self.revise = Revise(self.llm)
+    async def __call__(self, problem):
+        answer = await self.answer_generate(input=problem)
+        review = await self.review(problem=problem, solution=answer['answer'])
+        if not review['review_result']:
+            revised = await self.revise(problem=problem, solution=answer['answer'], feedback=review['feedback'])
+            answer = revised['solution']
+        return answer, self.llm.get_usage_summary()["total_cost"]
+```
+
+## Core Rules
+- Use .get('key, default) for safe dictionary access
+- Always return (answer, cost) tuple
+- STRICT consistency: import → initialize → use
+- Never import operators you don't use
+- Never use operators you don't import or initialize"""
+
+        # Problem-type-specific constraints with consistency requirements
         if problem_type == "code":
             type_constraint = """
 
@@ -197,15 +254,21 @@ ScEnsemble(solutions: List[str], problem: str) -> {{'response': str}}
 - MUST use Test to execute with test cases
 - Return (solution, cost) tuple
 
+CONSISTENCY REQUIREMENTS for CODE problems:
+✅ Import: `from scripts.operators import Programmer, Test`
+✅ Initialize: `self.programmer = Programmer(self.llm)` and `self.test = Test(self.llm)`
+✅ Use: `await self.programmer(...)` and `await self.test(...)`
+
 Required Pattern:
 from scripts.operators import Programmer, Test
 class Workflow:
     def __init__(self, name: str, llm_config, dataset):
         self.llm = create_llm_instance(llm_config)
         self.programmer = Programmer(self.llm)
-        self.test = Test(self.llm)
+        self.test = Test(self.llm)  # Both imported operators must be initialized
 
     async def __call__(self, problem: str, entry_point: str, test: str):
+        # Both operators must be used
         code_result = await self.programmer(problem=problem, analysis="")
         test_result = await self.test(problem=problem, solution=code_result['code'], entry_point=entry_point)
         return test_result['solution'] if test_result['result'] else code_result['output'], self.llm.get_usage_summary()["total_cost"]"""
@@ -219,16 +282,32 @@ class Workflow:
 - DO NOT use Programmer or Test
 - Return (answer, cost) tuple
 
+CONSISTENCY REQUIREMENTS for MATH problems:
+✅ Import: `from scripts.operators import AnswerGenerate`
+✅ Initialize: `self.answer_generate = AnswerGenerate(self.llm)`
+✅ Use: `await self.answer_generate(input=problem)`
+✅ OPTIONAL: Add Review/Revise for enhanced accuracy
+
 Required Pattern:
-from scripts.operators import AnswerGenerate
+from scripts.operators import AnswerGenerate, Review, Revise
 class Workflow:
     def __init__(self, name: str, llm_config, dataset):
         self.llm = create_llm_instance(llm_config)
         self.answer_generate = AnswerGenerate(self.llm)
+        self.review = Review(self.llm)        # Optional: for verification
+        self.revise = Revise(self.llm)        # Optional: for improvement
 
     async def __call__(self, problem: str):
+        # Use AnswerGenerate for initial solution
         solution = await self.answer_generate(input=problem)
-        return solution['answer'], self.llm.get_usage_summary()["total_cost"]"""
+
+        # Enhanced pattern with review/revise (optional but recommended)
+        review = await self.review(problem=problem, solution=solution['answer'])
+        if not review['review_result']:
+            revised = await self.revise(problem=problem, solution=solution['answer'], feedback=review['feedback'])
+            solution = revised['solution']
+
+        return solution, self.llm.get_usage_summary()["total_cost"]"""
 
         elif problem_type == "qa":
             type_constraint = """
@@ -239,16 +318,32 @@ class Workflow:
 - DO NOT use Programmer or Test
 - Return (answer, cost) tuple
 
+CONSISTENCY REQUIREMENTS for QA problems:
+✅ Import: `from scripts.operators import AnswerGenerate`
+✅ Initialize: `self.answer_generate = AnswerGenerate(self.llm)`
+✅ Use: `await self.answer_generate(input=problem)`
+✅ OPTIONAL: Add Review/Revise for enhanced reasoning
+
 Required Pattern:
-from scripts.operators import AnswerGenerate
+from scripts.operators import AnswerGenerate, Review, Revise
 class Workflow:
     def __init__(self, name: str, llm_config, dataset):
         self.llm = create_llm_instance(llm_config)
         self.answer_generate = AnswerGenerate(self.llm)
+        self.review = Review(self.llm)        # Optional: for verification
+        self.revise = Revise(self.llm)        # Optional: for improvement
 
     async def __call__(self, problem: str):
-        solution = await self.answer_generate(input=problem)
-        return solution['answer'], self.llm.get_usage_summary()["total_cost"]"""
+        # Use AnswerGenerate for initial answer
+        answer = await self.answer_generate(input=problem)
+
+        # Enhanced pattern with review/revise (optional but recommended)
+        review = await self.review(problem=problem, solution=answer)
+        if not review['review_result']:
+            revised = await self.revise(problem=problem, solution=answer, feedback=review['feedback'])
+            answer = revised['solution']
+
+        return answer, self.llm.get_usage_summary()["total_cost"]"""
 
         else:
             type_constraint = ""
@@ -486,17 +581,21 @@ class Workflow:
                 return fixed_code, True, None
             else:
                 print(f"❌ 验证失败: {error_msg}")
-                if fixes:
-                    print(f"   尝试修复: {fixes}")
-                # 如果修复后通过了基本语法检查，仍返回修复后的代码
-                # 否则使用默认工作流
+                # 新策略：不使用默认工作流，让Qwen从真实错误中学习
+                print(f"🎯 新策略：保留原始代码，让Qwen从执行错误中学习")
+
+                # 检查原始代码是否至少可编译
                 try:
-                    compile(fixed_code, '<string>', 'exec')
-                    print(f"⚠️ 代码可编译，使用修复版本")
-                    return fixed_code, False, error_msg
+                    compile(code, '<string>', 'exec')
+                    print(f"✅ 原始代码可编译，将执行并从错误中学习")
+                    return code, False, error_msg  # 返回原始代码，标记为验证失败
+                except SyntaxError as syntax_error:
+                    print(f"❌ 原始代码有语法错误: {syntax_error}")
+                    # 语法错误无法通过执行学习，需要生成新的
+                    return self._get_default_workflow(problem_type), False, f"Syntax error: {syntax_error}"
                 except:
-                    print(f"❌ 修复后仍无法编译，使用默认工作流")
-                    return self._get_default_workflow(problem_type), False, error_msg
+                    print(f"❌ 编译失败，使用默认工作流作为最后手段")
+                    return self._get_default_workflow(problem_type), False, "Compilation failed"
 
         except Exception as e:
             print(f"❌ 异常捕获: {str(e)}")

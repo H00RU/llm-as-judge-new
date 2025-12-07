@@ -61,9 +61,10 @@ class RewardComputer:
         else:
             self.extractor = None
 
-        print(f"✅ 5-Tier Reward System Initialized")
+        print(f"✅ 5-Tier Reward System with Consistency Enforcement Initialized")
         print(f"   Tiers: [0.0, 0.25, 0.5, 0.75, 1.0]")
         print(f"   Answer Extractor: {'Enabled' if use_answer_extractor else 'Disabled'}")
+        print(f"   Consistency Check: Enabled (violations = immediate 0.0 reward)")
 
     def compute_reward(
         self,
@@ -75,7 +76,7 @@ class RewardComputer:
         execution_metadata: Optional[Dict] = None
     ) -> Dict:
         """
-        5-tier reward computation with clear learning gradient.
+        5-tier reward computation with consistency checking.
 
         Args:
             problem: Problem text
@@ -95,7 +96,43 @@ class RewardComputer:
         metadata = metadata or {}
         execution_metadata = execution_metadata or {}
 
-        # Step 1: Check for execution failure - direct 0.0 reward
+        # Step 0: Check for real execution errors - IMMEDIATE 0.0 reward with learning feedback
+        execution_error = execution_metadata.get('execution_error')
+        if execution_error:
+            # 真实执行错误，提供具体学习反馈
+            return {
+                'reward': 0.0,
+                'tier': 1,
+                'breakdown': {
+                    'reason': 'execution_failure',
+                    'error_type': execution_error.get('type'),
+                    'error_message': execution_error.get('message'),
+                    'learning_point': execution_error.get('learning_point'),
+                    'is_consistency_error': execution_error.get('is_consistency_error', False),
+                    'problem_type': problem_type
+                }
+            }
+
+        # Step 1: Check operator consistency violations (pre-execution check)
+        validation_metadata = execution_metadata.get('validation_metadata', {})
+        is_consistent = validation_metadata.get('is_consistent', True)
+        consistency_errors = validation_metadata.get('consistency_errors', [])
+
+        if not is_consistent:
+            # 预检查发现不一致，但代码仍被执行了
+            return {
+                'reward': 0.0,
+                'tier': 1,
+                'breakdown': {
+                    'reason': 'operator_consistency_violation',
+                    'errors': consistency_errors,
+                    'message': 'Import-Initialization-Usage inconsistency detected during validation',
+                    'learning_message': '导入-初始化-使用必���一致',
+                    'problem_type': problem_type
+                }
+            }
+
+        # Step 2: Check for execution failure - direct 0.0 reward
         if not execution_metadata.get('success', True):
             return {
                 'reward': 0.0,
@@ -107,7 +144,7 @@ class RewardComputer:
                 }
             }
 
-        # Step 2: Extract answers using enhanced extractor
+        # Step 3: Extract answers using enhanced extractor
         if self.use_answer_extractor and self.extractor:
             try:
                 pred_extracted = self.extractor.extract_answer(
@@ -125,7 +162,7 @@ class RewardComputer:
             pred_extracted = str(prediction)
             gt_extracted = str(ground_truth)
 
-        # Step 3: Compute problem-type-specific reward (5-tier)
+        # Step 4: Compute problem-type-specific reward (5-tier)
         if problem_type == "math":
             reward, reason = self._compute_math_reward(pred_extracted, gt_extracted)
         elif problem_type == "code":
