@@ -54,7 +54,10 @@ class AFlowExecutor:
         self.standardizer = ResponseStandardizer()  # 响应标准化器
 
         # 初始化工作流验证器（增强版，包含一致性检查）
-        from .workflow_validator import WorkflowValidator
+        try:
+            from .workflow_validator import WorkflowValidator
+        except ImportError:
+            from workflow_validator import WorkflowValidator
         self.validator = WorkflowValidator()
 
         # 加载LLM配置

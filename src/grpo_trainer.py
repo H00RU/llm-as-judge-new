@@ -88,50 +88,11 @@ class GRPOTrainer:
         # 跳过GPU环境验证，直接使用
         print(f"✅ 使用GPU {physical_gpus}（已禁用清理和验证）")
 
-        # Temperature scheduling配置
-        temp_config = self.config.get('temperature_schedule', {})
-        self.temp_schedule = {
-            'enabled': temp_config.get('enabled', True),
-            'initial': temp_config.get('initial', 0.3),
-            'final': temp_config.get('final', 0.8),
-            'warmup_steps': temp_config.get('warmup_steps', 100)
-        }
-        print(f"\n🌡️  Temperature Scheduling:")
-        print(f"  Enabled: {self.temp_schedule['enabled']}")
-        if self.temp_schedule['enabled']:
-            print(f"  Range: {self.temp_schedule['initial']} → {self.temp_schedule['final']}")
-            print(f"  Warmup: {self.temp_schedule['warmup_steps']} steps")
-
-        # 🆕 Fallback动态调度配置（Priority 2.2）
-        fallback_config = self.config.get('fallback_schedule', {})
-        self.fallback_config = {
-            'enabled': True,  # Fallback机制默认启用
-            'dynamic_schedule': fallback_config.get('dynamic_schedule', True),
-            'disable_threshold': fallback_config.get('disable_threshold', 0.5),  # 成功率>50%时禁用
-            'current_success_rate': 0.0,
-            'window_size': fallback_config.get('window_size', 50)  # 滑动窗口大小
-        }
-        print(f"\n🔄 Fallback Dynamic Scheduling:")
-        print(f"  Dynamic: {self.fallback_config['dynamic_schedule']}")
-        if self.fallback_config['dynamic_schedule']:
-            print(f"  Disable threshold: {self.fallback_config['disable_threshold']*100:.0f}% success rate")
-            print(f"  Evaluation window: {self.fallback_config['window_size']} samples")
-
-        # 🆕 Progressive Strictness Schedule配置（关键修正）
-        strictness_config = self.config.get('strictness_schedule', {})
-        self.strictness_schedule = {
-            'enabled': strictness_config.get('enabled', True),
-            'stages': strictness_config.get('stages', [
-                {'steps': 50, 'mode': 'lenient', 'auto_fix_cap': 0.85, 'operator_mismatch_cap': 0.4},
-                {'steps': 150, 'mode': 'moderate', 'auto_fix_cap': 0.7, 'operator_mismatch_cap': 0.2},
-                {'steps': 999999, 'mode': 'strict', 'auto_fix_cap': 0.5, 'operator_mismatch_cap': 0.0}
-            ])
-        }
-        print(f"\n📊 Progressive Strictness Schedule:")
-        print(f"  Enabled: {self.strictness_schedule['enabled']}")
-        if self.strictness_schedule['enabled']:
-            for stage in self.strictness_schedule['stages']:
-                print(f"  Stage @ step {stage['steps']}: {stage['mode']} (auto_fix_cap={stage['auto_fix_cap']}, op_mismatch_cap={stage['operator_mismatch_cap']})")
+        # 简化配置：使用固定generation config
+        gen_config = self.config.get('generation_config', {})
+        self.generation_temperature = gen_config.get('temperature', 0.4)
+        print(f"\n🌡️  Generation Config:")
+        print(f"  Temperature: {self.generation_temperature} (fixed)")
 
         # ✨ 初始化wandb
         self._initialize_wandb()
@@ -359,67 +320,6 @@ class GRPOTrainer:
             print(f"  💾 Total: {total:.2f} GB")
             print(f"  📈 Usage: {(allocated/total)*100:.1f}%")
 
-    def get_current_temperature(self, step: int) -> float:
-        """
-        计算当前step的temperature
-
-        策略: 线性从initial升至final
-        - 早期: 低温度生成确定性workflow，建立baseline
-        - 后期: 高温度探索多样性workflow
-
-        Args:
-            step: 当前训练步数
-
-        Returns:
-            当前的temperature值
-        """
-        if not self.temp_schedule['enabled']:
-            return self.config['generation_config']['temperature']
-
-        if step < self.temp_schedule['warmup_steps']:
-            # Linear warmup
-            progress = step / self.temp_schedule['warmup_steps']
-            temp = (self.temp_schedule['initial'] +
-                   progress * (self.temp_schedule['final'] - self.temp_schedule['initial']))
-        else:
-            temp = self.temp_schedule['final']
-
-        return temp
-
-    def get_current_strictness(self, step: int) -> Dict:
-        """
-        获取当前step的strictness配置（Progressive Strictness Schedule）
-
-        策略：分阶段调整auto-fix和operator_mismatch的惩罚力度
-        - Stage 1 (0-50): Lenient - auto_fix_cap=0.85, op_mismatch_cap=0.4
-        - Stage 2 (51-150): Moderate - auto_fix_cap=0.7, op_mismatch_cap=0.2
-        - Stage 3 (151+): Strict - auto_fix_cap=0.5, op_mismatch_cap=0.0
-
-        Args:
-            step: 当前训练步数
-
-        Returns:
-            {'auto_fix_cap': float, 'operator_mismatch_cap': float}
-        """
-        if not self.strictness_schedule['enabled']:
-            # 禁用时返回默认配置
-            return {
-                'auto_fix_cap': 0.7,
-                'operator_mismatch_cap': 0.0
-            }
-
-        # 找到当前stage
-        current_stage = self.strictness_schedule['stages'][-1]  # 默认最后一个
-        for stage in self.strictness_schedule['stages']:
-            if step < stage['steps']:
-                current_stage = stage
-                break
-
-        return {
-            'auto_fix_cap': current_stage['auto_fix_cap'],
-            'operator_mismatch_cap': current_stage['operator_mismatch_cap'],
-            'mode': current_stage['mode']
-        }
 
     async def train_step(self, step: int) -> Dict:
         """
@@ -439,8 +339,8 @@ class GRPOTrainer:
         batch_stats = self.data_manager.get_batch_stats(batch)
         print(f"\n📦 Batch {step}: {len(batch)} 样本, 分布: {batch_stats}")
 
-        # 获取当前temperature（动态调度）
-        current_temp = self.get_current_temperature(step)
+        # 使用固定temperature（简化版）
+        current_temp = self.generation_temperature
         print(f"🌡️  Temperature: {current_temp:.3f}")
 
         # 2. 为每个问题生成K个工作流（GRPO组）
@@ -505,9 +405,6 @@ class GRPOTrainer:
                     # - tier: 1-5 (tier level)
                     # - breakdown: detailed metrics per problem type
 
-                    # 🆕 获取当前step的strictness配置并添加到metadata
-                    strictness_config = self.get_current_strictness(step)
-                    metadata['strictness'] = strictness_config  # 传递给reward计算
                     metadata['step'] = step  # 记录当前step
 
                     reward_result = self.reward_computer.compute_reward(
@@ -720,35 +617,6 @@ class GRPOTrainer:
             wandb_log_data[f"train/accuracy_{ptype}"] = stats['accuracy']
             wandb_log_data[f"train/avg_score_{ptype}"] = stats['avg_score']
             wandb_log_data[f"train/count_{ptype}"] = stats['count']
-
-        # 🆕 Fallback动态调度（Priority 2.2）
-        if self.fallback_config['dynamic_schedule']:
-            # 计算当前成功率（reward >= 0.4视为成功）
-            success_count = sum(1 for r in all_rewards if r >= 0.4)
-            current_success_rate = success_count / len(all_rewards) if all_rewards else 0.0
-
-            # 更新滑动窗口平均成功率（指数移动平均）
-            alpha = 0.1  # 平滑系数
-            self.fallback_config['current_success_rate'] = (
-                alpha * current_success_rate +
-                (1 - alpha) * self.fallback_config['current_success_rate']
-            )
-
-            # 动态调整fallback启用状态
-            avg_success_rate = self.fallback_config['current_success_rate']
-            threshold = self.fallback_config['disable_threshold']
-
-            if avg_success_rate > threshold and self.executor.enable_fallback:
-                self.executor.enable_fallback = False
-                print(f"\n✅ 成功率 {avg_success_rate:.1%} > {threshold:.0%}，禁用fallback")
-            elif avg_success_rate <= threshold and not self.executor.enable_fallback:
-                self.executor.enable_fallback = True
-                print(f"\n⚠️  成功率 {avg_success_rate:.1%} ≤ {threshold:.0%}，重新启用fallback")
-
-            # 记录到wandb
-            wandb_log_data['train/success_rate_current'] = current_success_rate
-            wandb_log_data['train/success_rate_avg'] = avg_success_rate
-            wandb_log_data['train/fallback_enabled'] = int(self.executor.enable_fallback)
 
         wandb.log(wandb_log_data, step=step)
 

@@ -1,237 +1,188 @@
 #!/usr/bin/env python3
 """
-Enhanced Workflow Validator - Consistency Enforcement
+Workflow Validator - 多层验证系统
 
-Prevents operator import-initialization-usage inconsistencies.
-No auto-fixing, only preventive validation and fallback to consistent defaults.
+验证层次：
+1. 语法验证：Python代码是否有效
+2. 结构验证：是否有async def __call__方法和正确的签名
+3. 一致性验证：Operator的import-initialization-usage是否一致
+4. 逻辑验证：代码是否有return语句和基本逻辑
 """
 
 import ast
 import re
-from typing import List, Tuple, Set
+from typing import Tuple, List, Dict
 
 
 class WorkflowValidator:
-    """Enhanced validator with operator consistency checking"""
+    """多层验证的Workflow验证器"""
 
     def __init__(self):
-        """Initialize validator"""
-        # Available operators that can be imported
-        self.available_operators = {
-            'Custom', 'AnswerGenerate', 'Programmer', 'Test', 'Review',
-            'Revise', 'Format', 'ScEnsemble', 'MdEnsemble', 'CustomCodeGenerate'
+        """初始化验证器"""
+        # 定义问题类型和对应的有效operators
+        self.valid_operators = {
+            'math': ['answer_generate', 'review', 'revise', 'scensemble', 'custom'],
+            'code': ['programmer', 'test', 'review', 'revise', 'custom'],
+            'qa': ['answer_generate', 'review', 'revise', 'scensemble', 'custom'],
         }
 
-    def extract_imports(self, code: str) -> Set[str]:
-        """Extract operator names from import statements"""
-        imports = set()
-        # Match patterns like: from scripts.operators import Custom, AnswerGenerate
-        pattern = r'from\s+scripts\.operators\s+import\s+([^#\n]+)'
-        matches = re.findall(pattern, code)
-
-        for match in matches:
-            # Clean up and split by commas
-            operators = [op.strip() for op in match.split(',')]
-            for op in operators:
-                # Remove any aliases (as X) and only keep operator names
-                op_name = op.split(' as ')[0].strip()
-                if op_name and op_name in self.available_operators:
-                    imports.add(op_name)
-
-        return imports
-
-    def extract_initializations(self, code: str) -> Set[str]:
-        """Extract operator names from self.X = Operator(...) patterns"""
-        inits = set()
-        # Match patterns like: self.custom = Custom(self.llm)
-        pattern = r'self\.(\w+)\s*=\s*(\w+)\s*\('
-        matches = re.findall(pattern, code)
-
-        for attr_name, op_name in matches:
-            # Only count if the operator name matches available operators
-            if op_name in self.available_operators:
-                inits.add(op_name)
-
-        return inits
-
-    def extract_usages(self, code: str) -> Set[str]:
-        """Extract operator names from await self.X(...) patterns"""
-        usages = set()
-
-        # Simple approach: look for "await self." followed by word and "("
-        # But be more robust by finding all occurrences
-        import re
-        pattern = r'await\s+self\.(\w+)\s*\('
-
-        # Use a more comprehensive search that handles multi-line and complex cases
-        for match in re.finditer(pattern, code):
-            attr_name = match.group(1)
-
-            # Convert attribute name back to operator name
-            # Handle both patterns: custom->Custom, answer_generate->AnswerGenerate
-            if attr_name in [op.lower() for op in self.available_operators]:
-                # Direct match (e.g., custom -> Custom)
-                for avail_op in self.available_operators:
-                    if avail_op.lower() == attr_name:
-                        usages.add(avail_op)
-                        break
-            elif '_' in attr_name:
-                # Handle snake_case to CamelCase conversion
-                # (answer_generate -> AnswerGenerate)
-                op_name = ''.join(word.capitalize() for word in attr_name.split('_'))
-                if op_name in self.available_operators:
-                    usages.add(op_name)
-            else:
-                # Try case-insensitive match
-                op_name = attr_name.capitalize()
-                if op_name in self.available_operators:
-                    usages.add(op_name)
-
-        return usages
-
-    def check_operator_consistency(self, code: str) -> Tuple[bool, List[str]]:
+    def validate_and_fix_workflow(self, code: str, problem_type: str) -> Tuple[str, bool, str, list]:
         """
-        Check import-initialization-usage consistency.
+        多层验证工作流代码
 
-        Returns:
-            (is_consistent, error_messages)
-        """
-        imports = self.extract_imports(code)
-        inits = self.extract_initializations(code)
-        usages = self.extract_usages(code)
+        验证步骤：
+        1. 语法验证
+        2. 结构验证
+        3. 一致性验证
+        4. 逻辑验证
 
-        errors = []
-
-        # 1. All imports must be initialized
-        for op in imports:
-            if op not in inits:
-                errors.append(f"❌ 导入{op}但未初始化：添加 self.{op.lower()} = {op}(self.llm)")
-
-        # 2. All initializations must be imported
-        for op in inits:
-            if op not in imports:
-                errors.append(f"❌ 初始化{op}但未导入：添加 from scripts.operators import {op}")
-
-        # 3. All usages must be imported and initialized
-        for op in usages:
-            if op not in imports:
-                errors.append(f"❌ 使用{op}但未导入：添加 from scripts.operators import {op}")
-            if op not in inits:
-                errors.append(f"❌ 使用{op}但未初始化：添加 self.{op.lower()} = {op}(self.llm)")
-
-        # 4. Check for unused imports/initializations
-        unused_imports = imports - usages
-        unused_inits = inits - usages
-
-        for op in unused_imports:
-            errors.append(f"⚠️ 导入{op}但未使用（浪费资源）")
-
-        for op in unused_inits:
-            errors.append(f"⚠️ 初始化{op}但未使用（浪费资源）")
-
-        is_consistent = len(errors) == 0
-        return is_consistent, errors
-
-    def get_consistent_default(self, problem_type: str) -> str:
-        """Return a consistent default workflow for fallback"""
-        if problem_type == "code":
-            return '''
-from scripts.operators import Custom, Test
-
-class Workflow:
-    def __init__(self, name: str, llm_config, dataset):
-        self.name = name
-        self.dataset = dataset
-        self.llm = create_llm_instance(llm_config)
-        self.custom = Custom(self.llm)
-        self.test = Test(self.llm)
-
-    async def __call__(self, problem: str, entry_point: str = "solve"):
-        analysis = await self.custom(problem, "Analyze requirements and design solution")
-        solution_code = await self.custom(analysis['response'], "Generate complete Python solution")
-        test_result = await self.test(problem, solution_code['response'], entry_point)
-
-        return solution_code['response']
-
-TASK_PROMPT = """Generate a complete Python solution that passes all test cases."""
-'''
-        elif problem_type == "math":
-            return '''
-from scripts.operators import Custom, AnswerGenerate
-
-class Workflow:
-    def __init__(self, name: str, llm_config, dataset):
-        self.name = name
-        self.dataset = dataset
-        self.llm = create_llm_instance(llm_config)
-        self.custom = Custom(self.llm)
-        self.answer_generate = AnswerGenerate(self.llm)
-
-    async def __call__(self, problem: str, entry_point: str = "solve"):
-        reasoning = await self.custom(problem, "Solve step-by-step with clear mathematical reasoning")
-        final_answer = await self.answer_generate(reasoning['response'])
-
-        return final_answer.get('answer', reasoning['response'])
-
-TASK_PROMPT = """Solve the mathematical problem with step-by-step reasoning and provide the final answer."""
-'''
-        else:  # qa
-            return '''
-from scripts.operators import Custom, AnswerGenerate
-
-class Workflow:
-    def __init__(self, name: str, llm_config, dataset):
-        self.name = name
-        self.dataset = dataset
-        self.llm = create_llm_instance(llm_config)
-        self.custom = Custom(self.llm)
-        self.answer_generate = AnswerGenerate(self.llm)
-
-    async def __call__(self, problem: str, entry_point: str = "solve"):
-        research = await self.custom(problem, "Research and gather relevant information")
-        final_answer = await self.answer_generate(research['response'])
-
-        return final_answer.get('answer', research['response'])
-
-TASK_PROMPT = """Provide a comprehensive and accurate answer to the question."""
-'''
-
-    def validate_and_fix_workflow(self, code: str, problem_type: str):
-        """
-        Enhanced validation with consistency checking (no fixing).
+        Args:
+            code: 工作流代码
+            problem_type: "math", "code", 或 "qa"
 
         Returns:
             (code, is_valid, error_msg, fixes_applied)
         """
-        # Phase 1: Basic syntax check
+        fixes = []
+
+        # ===== Layer 1: Syntax Check =====
         try:
             compile(code, '<string>', 'exec')
         except SyntaxError as e:
-            return (code, False, f"Syntax error: {str(e)}", [])
+            return (code, False, f"语法错误: {str(e)}", fixes)
 
-        # Phase 2: Basic structure check
-        if 'class Workflow' not in code:
-            return (code, False, "Missing 'class Workflow' definition", [])
+        # ===== Layer 2: Structure Check =====
+        # Check for async def __call__ presence
+        if 'async def __call__' not in code:
+            return (code, False, "缺少 'async def __call__' 方法", fixes)
 
-        if 'def __call__' not in code and 'async def __call__' not in code:
-            return (code, False, "Missing '__call__' method", [])
+        # Check signature
+        signature_error = self._validate_signature(code, problem_type)
+        if signature_error:
+            return (code, False, signature_error, fixes)
 
-        # Phase 3: Operator consistency check (CRITICAL)
-        is_consistent, consistency_errors = self.check_operator_consistency(code)
+        # ===== Layer 3: Operator Consistency Check (NEW) =====
+        consistency_errors = self._check_operator_consistency(code, problem_type)
+        if consistency_errors:
+            error_msg = "Operator一致性检查失败:\n" + "\n".join(consistency_errors)
+            return (code, False, error_msg, fixes)
 
-        if not is_consistent:
-            # ✅ 只检查，不替换：返回原始代码+错误信息
-            error_msg = "Operator consistency violations: " + "; ".join(consistency_errors)
-            return (code, False, error_msg, [])  # 返回原始代码，不是默认工作流
+        # ===== Layer 4: Logic Feasibility Check (NEW) =====
+        logic_errors = self._check_logic_feasibility(code, problem_type)
+        if logic_errors:
+            # Logic errors are warnings, not failures
+            # Just log them but don't fail validation
+            pass
 
         # All checks passed
-        return (code, True, "", [])
+        return (code, True, "", fixes)
+
+    def _validate_signature(self, code: str, problem_type: str) -> str:
+        """
+        验证__call__方法的签名是否正确
+
+        Returns:
+            错误信息（如果验证失败），或空字符串（如果验证成功）
+        """
+        if problem_type == "code":
+            # CODE workflows must accept (problem, entry_point, test)
+            code_pattern = r'async\s+def\s+__call__\s*\(\s*self\s*,\s*problem\s*:\s*str\s*,\s*entry_point\s*:\s*str\s*,\s*test\s*:\s*str\s*\)'
+            if not re.search(code_pattern, code):
+                return "CODE问题的签名必须是: async def __call__(self, problem: str, entry_point: str, test: str)"
+
+        elif problem_type in ["math", "qa"]:
+            # MATH/QA workflows must accept (problem)
+            math_qa_pattern = r'async\s+def\s+__call__\s*\(\s*self\s*,\s*problem\s*:\s*str\s*\)'
+            if not re.search(math_qa_pattern, code):
+                return f"{problem_type.upper()}问题的签名必须是: async def __call__(self, problem: str)"
+
+        return ""
+
+    def _check_operator_consistency(self, code: str, problem_type: str) -> List[str]:
+        """
+        检查Operator的一致性：import-initialization-usage
+
+        新策略：在预初始化架构中，我们不检查imports和initialization（因为基类已处理）
+        我们只检查：
+        1. 使用的operators是否有效（问题类型匹配）
+        2. Operator调用的参数是否合理
+
+        Returns:
+            错误列表（如果一致，返回空列表）
+        """
+        errors = []
+
+        # 找出代码中使用的所有operators
+        operator_keywords = {
+            'answer_generate': r'self\.answer_generate\s*\(',
+            'programmer': r'self\.programmer\s*\(',
+            'test': r'self\.test\s*\(',
+            'review': r'self\.review\s*\(',
+            'revise': r'self\.revise\s*\(',
+            'scensemble': r'self\.scensemble\s*\(',
+            'custom': r'self\.custom\s*\(',
+        }
+
+        used_operators = []
+        for op_name, op_pattern in operator_keywords.items():
+            if re.search(op_pattern, code):
+                used_operators.append(op_name)
+
+        # 检查使用的operators是否都有效
+        valid_ops = self.valid_operators.get(problem_type, [])
+        invalid_ops = [op for op in used_operators if op not in valid_ops]
+
+        for op in invalid_ops:
+            errors.append(f"❌ Operator '{op}' 不适合 {problem_type} 问题")
+
+        return errors
+
+    def _check_logic_feasibility(self, code: str, problem_type: str) -> List[str]:
+        """
+        检查代码的逻辑可行性
+
+        检查项：
+        1. 是否有return语句
+        2. Return语句是否返回元组(result, cost)
+        3. 基本的流程逻辑
+
+        Returns:
+            警告列表
+        """
+        warnings = []
+
+        # Check for return statement
+        if not re.search(r'return\s+', code):
+            warnings.append("⚠️  缺少return语句")
+
+        # Check if return returns a tuple with cost
+        has_proper_return = re.search(r'return\s+\w+\s*,\s*self\.llm|return\s+\(.*?,.*?\)', code)
+        if not has_proper_return:
+            warnings.append("⚠️  return语句可能没有返回(result, cost)元组")
+
+        # Check if there are operator calls
+        if 'await self.' not in code and 'self.' not in code:
+            warnings.append("⚠️  代码中没有找到任何operator调用")
+
+        return warnings
 
     def extract_task_prompt(self, code: str) -> str:
-        """Extract TASK_PROMPT variable if present"""
-        # Simple pattern to extract TASK_PROMPT
+        """Extract TASK_PROMPT variable if present (legacy compatibility)"""
         pattern = r"TASK_PROMPT\s*=\s*['\"]([^\"']*)['\"]"
         match = re.search(pattern, code)
         if match:
             return match.group(1)
         return ""
+
+
+# For backward compatibility
+def validate_workflow(code: str, problem_type: str) -> Tuple[str, bool, str]:
+    """
+    简化的验证函数（向后兼容接口）
+
+    Returns:
+        (code, is_valid, error_msg)
+    """
+    validator = WorkflowValidator()
+    code, is_valid, error_msg, _ = validator.validate_and_fix_workflow(code, problem_type)
+    return (code, is_valid, error_msg)

@@ -188,40 +188,227 @@ class RewardComputer:
             }
         }
 
+    def _is_math_correct(self, prediction: str, ground_truth: str) -> bool:
+        """
+        Comprehensive math answer comparison - handles all edge cases.
+
+        Comparison strategy:
+        1. Exact string match (case-insensitive, whitespace-normalized)
+        2. Extract and compare \boxed{} content
+        3. Numerical comparison with tolerance (handles fractions, decimals)
+        4. Extract last number from text and compare
+
+        This method solves the \boxed{13} vs 13 issue by extracting content first.
+
+        Args:
+            prediction: Model's predicted answer (may contain \boxed{})
+            ground_truth: Expected answer (may contain \boxed{})
+
+        Returns:
+            True if answers are mathematically equivalent, False otherwise
+        """
+        pred_str = str(prediction).strip()
+        gt_str = str(ground_truth).strip()
+
+        # 1. Exact string match (normalize whitespace and case)
+        pred_norm = ' '.join(pred_str.lower().split())
+        gt_norm = ' '.join(gt_str.lower().split())
+        if pred_norm == gt_norm:
+            return True
+
+        # 2. Extract \boxed{} content and compare
+        pred_boxed = self._extract_boxed_content(pred_str)
+        gt_boxed = self._extract_boxed_content(gt_str)
+
+        # If one has boxed and the other doesn't, compare boxed content with raw
+        if pred_boxed and not gt_boxed:
+            # Compare pred_boxed with gt_str
+            if self._answers_equal_normalized(pred_boxed, gt_str):
+                return True
+        elif gt_boxed and not pred_boxed:
+            # Compare pred_str with gt_boxed
+            if self._answers_equal_normalized(pred_str, gt_boxed):
+                return True
+        elif pred_boxed and gt_boxed:
+            # Both have boxed, compare the contents
+            if self._answers_equal_normalized(pred_boxed, gt_boxed):
+                return True
+
+        # 3. Numerical comparison with tolerance
+        try:
+            pred_num = self._parse_number_strict(pred_str)
+            gt_num = self._parse_number_strict(gt_str)
+            if pred_num is not None and gt_num is not None:
+                if self._numbers_equal(pred_num, gt_num):
+                    return True
+        except:
+            pass
+
+        # Also try comparing boxed contents numerically
+        if pred_boxed and gt_boxed:
+            try:
+                pred_num = self._parse_number_strict(pred_boxed)
+                gt_num = self._parse_number_strict(gt_boxed)
+                if pred_num is not None and gt_num is not None:
+                    if self._numbers_equal(pred_num, gt_num):
+                        return True
+            except:
+                pass
+
+        # 4. Extract last number from text and compare
+        pred_numbers = self._extract_numbers_from_text(pred_str)
+        gt_numbers = self._extract_numbers_from_text(gt_str)
+        if pred_numbers and gt_numbers:
+            try:
+                pred_last = self._parse_number_strict(pred_numbers[-1])
+                gt_last = self._parse_number_strict(gt_numbers[-1])
+                if pred_last is not None and gt_last is not None:
+                    if self._numbers_equal(pred_last, gt_last):
+                        return True
+            except:
+                pass
+
+        return False
+
+    def _extract_boxed_content(self, text: str) -> Optional[str]:
+        """Extract content from \boxed{...}"""
+        pattern = r'\\boxed\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}'
+        match = re.search(pattern, text)
+        return match.group(1).strip() if match else None
+
+    def _answers_equal_normalized(self, ans1: str, ans2: str) -> bool:
+        """Compare two answers after normalization"""
+        # Normalize strings
+        norm1 = ' '.join(ans1.lower().strip().split())
+        norm2 = ' '.join(ans2.lower().strip().split())
+        if norm1 == norm2:
+            return True
+
+        # Try numerical comparison
+        try:
+            num1 = self._parse_number_strict(ans1)
+            num2 = self._parse_number_strict(ans2)
+            if num1 is not None and num2 is not None:
+                return self._numbers_equal(num1, num2)
+        except:
+            pass
+
+        return False
+
+    def _parse_number_strict(self, text: str) -> Optional[float]:
+        """
+        Parse a number from text with better fraction support.
+
+        Handles:
+        - Regular floats: "3.14", "-5.2"
+        - Fractions: "1/2", "3/4"
+        - Mixed: "2 1/2" → 2.5
+        """
+        if not text:
+            return None
+
+        text = str(text).strip()
+
+        # Remove common LaTeX commands
+        text = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', r'\1/\2', text)
+
+        # Try fraction first (e.g., "1/2", "3/4")
+        if '/' in text:
+            try:
+                parts = text.split('/')
+                if len(parts) == 2:
+                    numerator = float(parts[0].strip())
+                    denominator = float(parts[1].strip())
+                    if denominator != 0:
+                        return numerator / denominator
+            except:
+                pass
+
+        # Try direct float conversion
+        try:
+            return float(text)
+        except:
+            pass
+
+        # Extract first number from text
+        numbers = re.findall(r'-?\d+\.?\d*', text)
+        if numbers:
+            try:
+                return float(numbers[0])
+            except:
+                pass
+
+        return None
+
+    def _extract_numbers_from_text(self, text: str) -> list:
+        """Extract all number strings from text (including fractions)"""
+        numbers = []
+
+        # Extract fractions first
+        fractions = re.findall(r'-?\d+/\d+', text)
+        numbers.extend(fractions)
+
+        # Extract regular numbers
+        regular = re.findall(r'-?\d+\.?\d*', text)
+        for num in regular:
+            # Skip if it's part of a fraction we already found
+            if not any(num in frac for frac in fractions):
+                numbers.append(num)
+
+        return numbers
+
+    def _numbers_equal(self, a: float, b: float, rel_tol: float = 1e-6) -> bool:
+        """
+        Compare two numbers with relative tolerance.
+
+        Uses relative error to handle both small and large numbers correctly.
+        For numbers near zero, uses absolute tolerance.
+        """
+        # Handle exact equality
+        if a == b:
+            return True
+
+        # Handle near-zero cases with absolute tolerance
+        if abs(b) < 1e-9:
+            return abs(a - b) < 1e-9
+
+        # Use relative error for general case
+        rel_error = abs(a - b) / abs(b)
+        return rel_error < rel_tol
+
     def _compute_math_reward(self, prediction: str, ground_truth: str) -> Tuple[float, str]:
         """
-        Compute 5-tier reward for math problems.
+        Compute reward for math problems - uses exact matching first, then error-based tiers.
 
-        Tiers based on error:
-        - Tier 1 (0.0): error >= 50% or parse error
-        - Tier 2 (0.25): 30-50% error
-        - Tier 3 (0.5): 10-30% error
-        - Tier 4 (0.75): 0.01-10% error
-        - Tier 5 (1.0): < 0.01% error (near perfect)
+        Strategy:
+        1. Check if answer is correct using _is_math_correct() → 1.0 reward
+        2. If not exact match, compute error-based tiered reward
 
         Returns:
             (reward, reason) tuple
         """
+        # First check if the answer is correct (handles all edge cases)
+        if self._is_math_correct(prediction, ground_truth):
+            return (1.0, "Correct answer")
+
+        # If not correct, compute error-based partial credit
         try:
             # Try to parse both as numbers
             pred_num = self._parse_number(prediction)
             gt_num = self._parse_number(ground_truth)
 
-            if pred_num is None:
-                return (0.0, "Cannot parse prediction as number")
-
-            if gt_num is None:
-                return (0.0, "Cannot parse ground truth as number")
+            if pred_num is None or gt_num is None:
+                return (0.0, "Cannot parse as number")
 
             # Calculate relative error
-            if gt_num == 0:
+            if abs(gt_num) < 1e-9:  # Ground truth near zero
                 error = abs(pred_num)
             else:
                 error = abs((pred_num - gt_num) / gt_num)
 
             # 5-tier classification based on error thresholds
-            if error < 0.0001:  # < 0.01%
-                return (1.0, f"Perfect/near-perfect (error={error:.6f})")
+            if error < 0.0001:  # < 0.01% (near perfect - catches any rounding)
+                return (1.0, f"Near-perfect (error={error:.6f})")
             elif error < 0.1:  # < 10%
                 return (0.75, f"Strong (error={error:.2%})")
             elif error < 0.3:  # < 30%
@@ -378,3 +565,65 @@ class RewardComputer:
         # Remove punctuation
         text = re.sub(r'[^\w\s]', '', text)
         return text
+
+    def evaluate_code_quality(self, code_metadata: Dict) -> Tuple[float, str]:
+        """
+        根据代码质量元数据评估代码质量得分
+
+        Args:
+            code_metadata: 代码质量检查的结果字典，包含：
+                - has_syntax_error: bool
+                - has_call_method: bool
+                - signature_correct: bool
+                - operators_valid: bool
+                - operator_calls_valid: bool
+                - has_return_statement: bool
+                - issues: List[str]
+
+        Returns:
+            (quality_score, reason) - quality_score 在 0.0 到 1.0 之间
+        """
+        if not code_metadata:
+            return (0.5, "无代码质量元数据")
+
+        # 统计通过的检查项
+        score = 1.0
+        issues = code_metadata.get('issues', [])
+
+        # 检查项权重（从严重到轻微）
+        if code_metadata.get('has_syntax_error', False):
+            score = 0.0  # 语法错误无法运行
+            return (score, "代码有语法错误，无法执行")
+
+        if not code_metadata.get('has_call_method', False):
+            score *= 0.0  # 没有__call__方法是致命的
+            return (score, "代码缺少async def __call__方法")
+
+        if not code_metadata.get('signature_correct', False):
+            score *= 0.1  # 签名错误会导致运行时错误
+
+        if not code_metadata.get('operators_valid', False):
+            score *= 0.3  # operator类型不匹配会导致运行失败
+            if issues:
+                reason = "Operator不适合该问题类型: " + "; ".join([i for i in issues if "Operator" in i])
+                return (score, reason)
+
+        if not code_metadata.get('operator_calls_valid', True):
+            score *= 0.5  # operator调用参数错误会导致运行时错误
+            if issues:
+                reason = "Operator调用参数错误: " + "; ".join([i for i in issues if "参数" in i or "错误" in i])
+                return (score, reason)
+
+        if not code_metadata.get('has_return_statement', False):
+            score *= 0.2  # 没有return语句是严重问题
+
+        # 根据最终分数返回
+        if score >= 0.9:
+            return (1.0, "代码质量优秀")
+        elif score >= 0.7:
+            return (0.75, "代码质量良好，但有轻微问题")
+        elif score >= 0.5:
+            return (0.5, f"代码质量一般，存在多个问题")
+        else:
+            reason = "代码质量差: " + "; ".join(issues) if issues else "代码质量差"
+            return (score, reason)

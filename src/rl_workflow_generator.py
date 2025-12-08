@@ -143,212 +143,375 @@ class RLWorkflowGenerator:
         }
 
     def _build_generation_prompt(self, problem: str, problem_type: str) -> str:
-        """Generate workflow prompt in clean XML format"""
+        """
+        生成新的简化Prompt - 使用预初始化基类
 
-        # Base prompt with strong operator consistency constraints
-        base_prompt = f"""You are building a Workflow to solve {problem_type} problems.
+        关键创新：
+        - 所有operators已在基类中预初始化
+        - 模型只需生成__call__方法体的调用逻辑
+        - 完全消除import和初始化错误
+        - 明确的约束和负面示例确保操作符正确选择
+        """
 
-You MUST output in the following XML format:
+        if problem_type == "math":
+            return f"""================================================================================
+🎯 TASK: Generate __call__ method for MATH problem workflow
+================================================================================
 
-```xml
-<workflow>
-  <graph>
-    class Workflow:
-        def __init__(self, name: str, llm_config, dataset):
-            self.name = name
-            self.dataset = dataset
-            self.llm = create_llm_instance(llm_config)
-            # CRITICAL: Initialize exactly the operators you import
+*** CRITICAL: PROBLEM TYPE = MATH ***
+Your problem is a MATH problem. Follow ALL constraints below strictly.
 
-        async def __call__(self, problem: str, entry_point: str = "solve"):
-            # CRITICAL: Only use operators you initialized
-            # Chain operators and return (answer, cost) tuple
-            result = await self.operator(input, instruction)
-            return final_answer, self.llm.get_usage_summary()["total_cost"]
-  </graph>
-  <prompt>
-    TASK_PROMPT = '''Task-specific prompt here'''
-  </prompt>
-</workflow>
-```
+================================================================================
+✅ OPERATORS YOU CAN USE (for MATH only):
+================================================================================
+1. self.answer_generate: Generate step-by-step solution
+   Call: await self.answer_generate(input=problem)
+   Returns: {{'thought': str, 'answer': str}}
 
-## Available Operators
+2. self.review: Review and validate answer
+   Call: await self.review(problem=problem, solution=solution)
+   Returns: {{'review_result': bool, 'feedback': str}}
 
-Custom(input: str, instruction: str) -> {{'response': str}}
-AnswerGenerate(input: str) -> {{'thought': str, 'answer': str}}
-Programmer(problem: str, analysis: str) -> {{'code': str, 'output': str}}
-Test(problem: str, solution: str, entry_point: str) -> {{'result': bool, 'solution': str}}
-Review(problem: str, solution: str) -> {{'review_result': bool, 'feedback': str}}
-Revise(problem: str, solution: str, feedback: str) -> {{'solution': str}}
-ScEnsemble(solutions: List[str], problem: str) -> {{'response': str}}
+3. self.revise: Revise solution based on feedback
+   Call: await self.revise(problem=problem, solution=solution, feedback=feedback)
+   Returns: {{'solution': str}}
 
-## Operator Consistency Rules (CRITICAL)
-**MANDATORY REQUIREMENTS - NO EXCEPTIONS:**
-1. Every operator used in __call__ MUST be imported
-2. Every imported operator MUST be initialized in __init__
-3. Every initialized operator MUST be used in __call__
-4. Imports and initializations MUST match exactly
-5. Violations will result in Tier 1 (0.0) reward
+4. self.scensemble: Self-consistency ensemble (for multiple solutions)
+   Call: await self.scensemble(solutions=solutions, problem=problem)
+   Returns: {{'response': str}}
 
-## Common Pitfalls (CRITICAL - AVOID THESE)
+5. self.custom: Custom prompting (for special cases only)
+   Call: await self.custom(input=input, instruction=instruction)
+   Returns: {{'response': str}}
 
-❌ WRONG - Missing import:
+================================================================================
+❌ OPERATORS YOU MUST NOT USE (for MATH problems):
+================================================================================
+- self.programmer: This is for CODE problems, NOT MATH!
+- self.test: This is for CODE problems, NOT MATH!
+Do NOT import or initialize any of these operators.
+
+================================================================================
+📋 REQUIRED SIGNATURE:
+================================================================================
+Your __call__ method MUST have exactly this signature:
+    async def __call__(self, problem: str) -> Tuple[str, float]:
+
+Parameters: only 'problem: str'
+Returns: (answer_string, cost_float)
+
+================================================================================
+✅ CORRECT EXAMPLE (follow this pattern):
+================================================================================
 ```python
-class Workflow:
-    def __init__(self, name, llm_config, dataset):
-        self.revise = Revise(self.llm)
-    async def __call__(self, problem):
-        return await self.revise(...)  # ← ImportError!
+# Step 1: Generate initial answer
+ans = await self.answer_generate(input=problem)
+answer = ans.get('answer', '')
+
+# Step 2: Review the answer
+review = await self.review(problem=problem, solution=answer)
+
+# Step 3: If feedback suggests revision, revise
+if not review.get('review_result', True):
+    revised = await self.revise(
+        problem=problem,
+        solution=answer,
+        feedback=review.get('feedback', '')
+    )
+    answer = revised.get('solution', answer)
+
+# Step 4: Return answer and cost
+return answer, self.llm.get_usage_summary().get("total_cost", 0.0)
 ```
 
-❌ WRONG - Missing initialization:
+================================================================================
+❌ WRONG EXAMPLES (DO NOT DO THIS):
+================================================================================
+WRONG #1: Using Programmer/Test operators
 ```python
-from scripts.operators import Revise
-class Workflow:
-    def __init__(self, name, llm_config, dataset):
-        # self.revise = Revise(self.llm)  # ← Missing!
-    async def __call__(self, problem):
-        return await self.revise(...)  # ← AttributeError!
+code = await self.programmer(problem=problem)  # ❌ WRONG! Use answer_generate instead
+result = await self.test(code)                 # ❌ WRONG! test is only for CODE problems
 ```
 
-❌ WRONG - Unused operator:
+WRONG #2: Wrong signature
 ```python
-from scripts.operators import Revise
-class Workflow:
-    def __init__(self, name, llm_config, dataset):
-        self.revise = Revise(self.llm)  # ← Never used!
-    async def __call__(self, problem):
-        return await self.answer_generate(...)  # ← Resource waste
+async def __call__(self, problem: str, test: str):  # ❌ WRONG! test parameter not allowed
+async def __call__(self, problem: str, entry_point: str, test: str):  # ❌ WRONG! Too many params
 ```
 
-✅ CORRECT - Import-Initialize-Use Consistency:
+WRONG #3: Missing return statement
 ```python
-from scripts.operators import AnswerGenerate, Revise
-class Workflow:
-    def __init__(self, name, llm_config, dataset):
-        self.answer_generate = AnswerGenerate(self.llm)
-        self.revise = Revise(self.llm)
-    async def __call__(self, problem):
-        answer = await self.answer_generate(input=problem)
-        review = await self.review(problem=problem, solution=answer['answer'])
-        if not review['review_result']:
-            revised = await self.revise(problem=problem, solution=answer['answer'], feedback=review['feedback'])
-            answer = revised['solution']
-        return answer, self.llm.get_usage_summary()["total_cost"]
+ans = await self.answer_generate(input=problem)
+answer = ans.get('answer', '')
+# ❌ WRONG! No return statement
 ```
 
-## Core Rules
-- Use .get('key, default) for safe dictionary access
-- Always return (answer, cost) tuple
-- STRICT consistency: import → initialize → use
-- Never import operators you don't use
-- Never use operators you don't import or initialize"""
+WRONG #4: Incorrect operator call parameters
+```python
+await self.answer_generate(problem=problem)  # ❌ WRONG! Parameter should be 'input', not 'problem'
+await self.review(solution=answer)           # ❌ WRONG! Must include 'problem' parameter
+```
 
-        # Problem-type-specific constraints with consistency requirements
-        if problem_type == "code":
-            type_constraint = """
+================================================================================
+🎯 PROBLEM TO SOLVE:
+================================================================================
+{problem}
 
-## CODE Problem Specific Rules
-- async def __call__(self, problem: str, entry_point: str, test: str)
-- MUST use Programmer to generate code
-- MUST use Test to execute with test cases
-- Return (solution, cost) tuple
+================================================================================
+📝 INSTRUCTIONS:
+================================================================================
+1. Generate ONLY the __call__ method body code (no imports, no class definition, no __init__)
+2. Start directly with the logic inside the async def __call__(self, problem: str): method
+3. Follow the CORRECT EXAMPLE pattern above
+4. Use ONLY the 5 allowed operators
+5. Never use Programmer or Test operators
+6. Ensure the method returns (answer, cost) tuple
+7. Handle operator responses with .get() to avoid KeyError
 
-CONSISTENCY REQUIREMENTS for CODE problems:
-✅ Import: `from scripts.operators import Programmer, Test`
-✅ Initialize: `self.programmer = Programmer(self.llm)` and `self.test = Test(self.llm)`
-✅ Use: `await self.programmer(...)` and `await self.test(...)`
+BEGIN CODE GENERATION:
+"""
 
-Required Pattern:
-from scripts.operators import Programmer, Test
-class Workflow:
-    def __init__(self, name: str, llm_config, dataset):
-        self.llm = create_llm_instance(llm_config)
-        self.programmer = Programmer(self.llm)
-        self.test = Test(self.llm)  # Both imported operators must be initialized
+        elif problem_type == "code":
+            return f"""================================================================================
+🎯 TASK: Generate __call__ method for CODE problem workflow
+================================================================================
 
-    async def __call__(self, problem: str, entry_point: str, test: str):
-        # Both operators must be used
-        code_result = await self.programmer(problem=problem, analysis="")
-        test_result = await self.test(problem=problem, solution=code_result['code'], entry_point=entry_point)
-        return test_result['solution'] if test_result['result'] else code_result['output'], self.llm.get_usage_summary()["total_cost"]"""
+*** CRITICAL: PROBLEM TYPE = CODE ***
+Your problem is a CODE problem. Follow ALL constraints below strictly.
 
-        elif problem_type == "math":
-            type_constraint = """
+================================================================================
+✅ OPERATORS YOU CAN USE (for CODE only):
+================================================================================
+1. self.programmer: Generate and execute Python code
+   Call: await self.programmer(problem=problem, analysis=analysis)
+   Returns: {{'code': str, 'output': str}}
 
-## MATH Problem Specific Rules
-- async def __call__(self, problem: str)
-- Use AnswerGenerate for step-by-step reasoning
-- DO NOT use Programmer or Test
-- Return (answer, cost) tuple
+2. self.test: Test code with test cases
+   Call: await self.test(problem=problem, solution=code, entry_point=entry_point, test=test)
+   Returns: {{'result': bool, 'solution': str}}
 
-CONSISTENCY REQUIREMENTS for MATH problems:
-✅ Import: `from scripts.operators import AnswerGenerate`
-✅ Initialize: `self.answer_generate = AnswerGenerate(self.llm)`
-✅ Use: `await self.answer_generate(input=problem)`
-✅ OPTIONAL: Add Review/Revise for enhanced accuracy
+3. self.review: Review code quality
+   Call: await self.review(problem=problem, solution=code)
+   Returns: {{'review_result': bool, 'feedback': str}}
 
-Required Pattern:
-from scripts.operators import AnswerGenerate, Review, Revise
-class Workflow:
-    def __init__(self, name: str, llm_config, dataset):
-        self.llm = create_llm_instance(llm_config)
-        self.answer_generate = AnswerGenerate(self.llm)
-        self.review = Review(self.llm)        # Optional: for verification
-        self.revise = Revise(self.llm)        # Optional: for improvement
+4. self.revise: Revise code based on feedback
+   Call: await self.revise(problem=problem, solution=code, feedback=feedback)
+   Returns: {{'solution': str}}
 
-    async def __call__(self, problem: str):
-        # Use AnswerGenerate for initial solution
-        solution = await self.answer_generate(input=problem)
+5. self.custom: Custom prompting (for special cases only)
+   Call: await self.custom(input=input, instruction=instruction)
+   Returns: {{'response': str}}
 
-        # Enhanced pattern with review/revise (optional but recommended)
-        review = await self.review(problem=problem, solution=solution['answer'])
-        if not review['review_result']:
-            revised = await self.revise(problem=problem, solution=solution['answer'], feedback=review['feedback'])
-            solution = revised['solution']
+================================================================================
+❌ OPERATORS YOU MUST NOT USE (for CODE problems):
+================================================================================
+- self.answer_generate: This is for MATH/QA problems, NOT CODE!
+- self.scensemble: This is for MATH/QA problems, NOT CODE!
+Do NOT import or initialize any of these operators.
 
-        return solution, self.llm.get_usage_summary()["total_cost"]"""
+================================================================================
+📋 REQUIRED SIGNATURE:
+================================================================================
+Your __call__ method MUST have exactly this signature:
+    async def __call__(self, problem: str, entry_point: str, test: str) -> Tuple[str, float]:
+
+Parameters: problem: str, entry_point: str, test: str (EXACTLY 3 parameters)
+Returns: (result_string, cost_float)
+
+================================================================================
+✅ CORRECT EXAMPLE (follow this pattern):
+================================================================================
+```python
+# Step 1: Generate code using Programmer
+code_result = await self.programmer(problem=problem, analysis='')
+code = code_result.get('code', '')
+
+# Step 2: Test the code with provided test cases
+test_result = await self.test(
+    problem=problem,
+    solution=code,
+    entry_point=entry_point,
+    test=test
+)
+
+# Step 3: If tests pass, return the solution; otherwise review and revise
+if test_result.get('result', False):
+    return test_result.get('solution', code), self.llm.get_usage_summary().get("total_cost", 0.0)
+else:
+    # Optionally review and revise
+    review = await self.review(problem=problem, solution=code)
+    if not review.get('review_result', True):
+        revised = await self.revise(problem=problem, solution=code, feedback=review.get('feedback', ''))
+        code = revised.get('solution', code)
+    return code, self.llm.get_usage_summary().get("total_cost", 0.0)
+```
+
+================================================================================
+❌ WRONG EXAMPLES (DO NOT DO THIS):
+================================================================================
+WRONG #1: Using AnswerGenerate/ScEnsemble operators
+```python
+ans = await self.answer_generate(input=problem)  # ❌ WRONG! Use programmer instead
+```
+
+WRONG #2: Wrong signature (not 3 parameters)
+```python
+async def __call__(self, problem: str):  # ❌ WRONG! Missing entry_point and test
+async def __call__(self, problem: str, entry_point: str):  # ❌ WRONG! Missing test
+```
+
+WRONG #3: Not returning execution result
+```python
+code_result = await self.programmer(problem=problem, analysis='')
+return code_result.get('code', '')  # ❌ WRONG! Should return test result, not code
+```
+
+WRONG #4: Missing test parameters
+```python
+await self.test(problem=problem, solution=code)  # ❌ WRONG! Missing entry_point and test
+```
+
+WRONG #5: Not handling test results correctly
+```python
+await self.test(problem=problem, solution=code, entry_point=entry_point, test=test)
+# Returns immediately without checking result
+```
+
+================================================================================
+🎯 PROBLEM TO SOLVE:
+================================================================================
+{problem}
+
+================================================================================
+📝 INSTRUCTIONS:
+================================================================================
+1. Generate ONLY the __call__ method body code (no imports, no class definition, no __init__)
+2. Start directly with the logic inside the async def __call__(self, problem: str, entry_point: str, test: str): method
+3. Follow the CORRECT EXAMPLE pattern above
+4. Use ONLY the 5 allowed operators
+5. Never use AnswerGenerate or ScEnsemble operators
+6. Ensure __call__ accepts exactly 3 parameters: problem, entry_point, test
+7. Ensure the method returns (result, cost) tuple
+8. Always test the code using self.test() operator
+
+BEGIN CODE GENERATION:
+"""
 
         elif problem_type == "qa":
-            type_constraint = """
+            return f"""================================================================================
+🎯 TASK: Generate __call__ method for QA problem workflow
+================================================================================
 
-## QA Problem Specific Rules
-- async def __call__(self, problem: str)
-- Use AnswerGenerate for text answers
-- DO NOT use Programmer or Test
-- Return (answer, cost) tuple
+*** CRITICAL: PROBLEM TYPE = QA ***
+Your problem is a QA (Question Answering) problem. Follow ALL constraints below strictly.
 
-CONSISTENCY REQUIREMENTS for QA problems:
-✅ Import: `from scripts.operators import AnswerGenerate`
-✅ Initialize: `self.answer_generate = AnswerGenerate(self.llm)`
-✅ Use: `await self.answer_generate(input=problem)`
-✅ OPTIONAL: Add Review/Revise for enhanced reasoning
+================================================================================
+✅ OPERATORS YOU CAN USE (for QA only):
+================================================================================
+1. self.answer_generate: Generate answer with reasoning
+   Call: await self.answer_generate(input=problem)
+   Returns: {{'thought': str, 'answer': str}}
 
-Required Pattern:
-from scripts.operators import AnswerGenerate, Review, Revise
-class Workflow:
-    def __init__(self, name: str, llm_config, dataset):
-        self.llm = create_llm_instance(llm_config)
-        self.answer_generate = AnswerGenerate(self.llm)
-        self.review = Review(self.llm)        # Optional: for verification
-        self.revise = Revise(self.llm)        # Optional: for improvement
+2. self.review: Review and validate answer
+   Call: await self.review(problem=problem, solution=answer)
+   Returns: {{'review_result': bool, 'feedback': str}}
 
-    async def __call__(self, problem: str):
-        # Use AnswerGenerate for initial answer
-        answer = await self.answer_generate(input=problem)
+3. self.revise: Revise answer based on feedback
+   Call: await self.revise(problem=problem, solution=answer, feedback=feedback)
+   Returns: {{'solution': str}}
 
-        # Enhanced pattern with review/revise (optional but recommended)
-        review = await self.review(problem=problem, solution=answer)
-        if not review['review_result']:
-            revised = await self.revise(problem=problem, solution=answer, feedback=review['feedback'])
-            answer = revised['solution']
+4. self.scensemble: Self-consistency ensemble (for multiple candidate answers)
+   Call: await self.scensemble(solutions=solutions, problem=problem)
+   Returns: {{'response': str}}
 
-        return answer, self.llm.get_usage_summary()["total_cost"]"""
+5. self.custom: Custom prompting (for special cases only)
+   Call: await self.custom(input=input, instruction=instruction)
+   Returns: {{'response': str}}
 
-        else:
-            type_constraint = ""
+================================================================================
+❌ OPERATORS YOU MUST NOT USE (for QA problems):
+================================================================================
+- self.programmer: This is for CODE problems, NOT QA!
+- self.test: This is for CODE problems, NOT QA!
+Do NOT import or initialize any of these operators.
 
-        return base_prompt + type_constraint
+================================================================================
+📋 REQUIRED SIGNATURE:
+================================================================================
+Your __call__ method MUST have exactly this signature:
+    async def __call__(self, problem: str) -> Tuple[str, float]:
+
+Parameters: only 'problem: str'
+Returns: (answer_string, cost_float)
+
+================================================================================
+✅ CORRECT EXAMPLE (follow this pattern):
+================================================================================
+```python
+# Step 1: Generate answer with reasoning
+ans = await self.answer_generate(input=problem)
+answer = ans.get('answer', '')
+
+# Step 2: Optionally review the answer
+review = await self.review(problem=problem, solution=answer)
+
+# Step 3: If feedback suggests revision, revise
+if not review.get('review_result', True):
+    revised = await self.revise(
+        problem=problem,
+        solution=answer,
+        feedback=review.get('feedback', '')
+    )
+    answer = revised.get('solution', answer)
+
+# Step 4: Return answer and cost
+return answer, self.llm.get_usage_summary().get("total_cost", 0.0)
+```
+
+================================================================================
+❌ WRONG EXAMPLES (DO NOT DO THIS):
+================================================================================
+WRONG #1: Using Programmer/Test operators
+```python
+code = await self.programmer(problem=problem)  # ❌ WRONG! Use answer_generate instead
+result = await self.test(code)                 # ❌ WRONG! test is only for CODE problems
+```
+
+WRONG #2: Wrong signature
+```python
+async def __call__(self, problem: str, test: str):  # ❌ WRONG! test parameter not allowed
+async def __call__(self, problem: str, entry_point: str):  # ❌ WRONG! entry_point not for QA
+```
+
+WRONG #3: Not returning answer
+```python
+ans = await self.answer_generate(input=problem)
+# ❌ WRONG! Missing return statement
+```
+
+WRONG #4: Wrong operator parameters
+```python
+await self.answer_generate(problem=problem)  # ❌ WRONG! Should be 'input', not 'problem'
+```
+
+================================================================================
+🎯 PROBLEM TO SOLVE:
+================================================================================
+{problem}
+
+================================================================================
+📝 INSTRUCTIONS:
+================================================================================
+1. Generate ONLY the __call__ method body code (no imports, no class definition, no __init__)
+2. Start directly with the logic inside the async def __call__(self, problem: str): method
+3. Follow the CORRECT EXAMPLE pattern above
+4. Use ONLY the 5 allowed operators
+5. Never use Programmer or Test operators
+6. Ensure the method returns (answer, cost) tuple
+7. Handle operator responses with .get() to avoid KeyError
+
+BEGIN CODE GENERATION:
+"""
 
     def generate_workflow(
         self,
@@ -407,8 +570,8 @@ class Workflow:
             skip_special_tokens=True
         )
 
-        # 解析输出
-        workflow_code, is_valid, error = self._parse_workflow_code(generated_text, problem_type)
+        # 解析输出（包含深度质量检查）
+        workflow_code, is_valid, error, quality_check = self._parse_workflow_code(generated_text, problem_type)
 
         result = {
             "workflow_code": workflow_code,
@@ -511,7 +674,7 @@ class Workflow:
                 )
 
                 # 解析工作流代码
-                workflow_code, is_valid, error = self._parse_workflow_code(
+                workflow_code, is_valid, error, quality_check = self._parse_workflow_code(
                     generated_text,
                     problem['type']
                 )
@@ -544,13 +707,17 @@ class Workflow:
         print(f"✅ 批量生成完成: {len(results)} 个工作流")
         return results
 
-    def _parse_workflow_code(self, generated_text: str, problem_type: str) -> Tuple[str, bool, Optional[str]]:
+    def _parse_workflow_code(self, generated_text: str, problem_type: str) -> Tuple[str, bool, Optional[str], Dict]:
         """
-        解析生成的文本，提取并使用reactive patching进行修复
+        解析生成的文本，进行多层验证
 
-        新策略：使用WorkflowValidator的reactive patching模式（参考项目验证过）
-        - 只修复实际问题，不做完整重构
-        - 更快、更可靠、更少副作用
+        流程：
+        1. 提取代码块
+        2. 进行深度质量检查
+        3. 使用WorkflowValidator进行验证
+        4. 返回代码和详细的质量信息
+
+        返回：(code, is_valid, error_msg, quality_check_result)
         """
 
         # DEBUG: 打印 Qwen 生成的原始文本
@@ -560,15 +727,34 @@ class Workflow:
         print(generated_text)  # 打印完整文本
         print(f"{'='*60}\n")
 
+        quality_check = {'operators_used': [], 'issues': []}
+
         try:
             # 1. 提取代码块（支持markdown和纯代码格式）
             code = self._extract_code_block(generated_text)
             if not code:
                 print(f"❌ 无法从生成文本中提取代码块")
-                return self._get_default_workflow(problem_type), False, "No code block found"
+                return self._get_default_workflow(problem_type), False, "No code block found", quality_check
 
-            # 2. 使用WorkflowValidator进行reactive patching验证
-            print(f"🔧 使用reactive patching进行验证和修复...")
+            # 2. 进行深度质量检查（新增）
+            print(f"\n📋 进行深度代码质量检查...")
+            quality_check = self._validate_workflow_code(code, problem_type)
+
+            # 打印质量检查结果
+            print(f"  Syntax Error: {quality_check['has_syntax_error']}")
+            print(f"  Has __call__: {quality_check['has_call_method']}")
+            print(f"  Signature Correct: {quality_check['signature_correct']}")
+            print(f"  Operators Valid: {quality_check['operators_valid']}")
+            print(f"  Has Return: {quality_check['has_return_statement']}")
+            if quality_check['operators_used']:
+                print(f"  Operators Used: {quality_check['operators_used']}")
+            if quality_check['issues']:
+                print(f"  Issues Detected:")
+                for issue in quality_check['issues']:
+                    print(f"    - {issue}")
+
+            # 3. 使用WorkflowValidator进行验证
+            print(f"\n🔧 使用WorkflowValidator进行验证...")
             fixed_code, is_valid, error_msg, fixes = self.validator.validate_and_fix_workflow(
                 code=code,
                 problem_type=problem_type
@@ -578,30 +764,33 @@ class Workflow:
                 print(f"✅ 验证成功")
                 if fixes:
                     print(f"   应用了以下修复: {fixes}")
-                return fixed_code, True, None
+                return fixed_code, True, None, quality_check
             else:
                 print(f"❌ 验证失败: {error_msg}")
-                # 新策略：不使用默认工作流，让Qwen从真实错误中学习
-                print(f"🎯 新策略：保留原始代码，让Qwen从执行错误中学习")
 
-                # 检查原始代码是否至少可编译
+                # 检查是否为严重错误（语法错误）
+                if quality_check['has_syntax_error']:
+                    print(f"❌ 严重问题：语法错误，无法执行")
+                    return self._get_default_workflow(problem_type), False, error_msg, quality_check
+
+                # 其他错误：保留原始代码，让模型从执行错误中学习
+                print(f"🎯 策略：保留原始代码，通过执行错误反馈让模型学习")
                 try:
                     compile(code, '<string>', 'exec')
                     print(f"✅ 原始代码可编译，将执行并从错误中学习")
-                    return code, False, error_msg  # 返回原始代码，标记为验证失败
+                    return code, False, error_msg, quality_check
                 except SyntaxError as syntax_error:
                     print(f"❌ 原始代码有语法错误: {syntax_error}")
-                    # 语法错误无法通过执行学习，需要生成新的
-                    return self._get_default_workflow(problem_type), False, f"Syntax error: {syntax_error}"
+                    return self._get_default_workflow(problem_type), False, f"Syntax error: {syntax_error}", quality_check
                 except:
-                    print(f"❌ 编译失败，使用默认工作流作为最后手段")
-                    return self._get_default_workflow(problem_type), False, "Compilation failed"
+                    print(f"❌ 编译失败，使用默认工作流")
+                    return self._get_default_workflow(problem_type), False, "Compilation failed", quality_check
 
         except Exception as e:
             print(f"❌ 异常捕获: {str(e)}")
             import traceback
             traceback.print_exc()
-            return self._get_default_workflow(problem_type), False, str(e)
+            return self._get_default_workflow(problem_type), False, str(e), quality_check
 
     def _get_default_workflow(self, problem_type: str = "math") -> str:
         """默认工作流（当生成失败时）"""
@@ -621,83 +810,224 @@ class Workflow:
         return solution['response'], self.llm.get_usage_summary()["total_cost"]
 """
 
+    def _validate_workflow_code(self, code: str, problem_type: str) -> Dict[str, bool]:
+        """
+        深度代码质量检查 - 在执行前检测问题
+
+        返回字典包含：
+        {
+            'has_syntax_error': bool,           # 有语法错误？
+            'has_call_method': bool,            # 有async def __call__？
+            'signature_correct': bool,          # 签名正确？
+            'operators_used': [list],           # 使用了哪些operators
+            'operators_valid': bool,            # operators 对问题类型有效？
+            'operator_calls_valid': bool,       # operator 调用参数合理？
+            'has_return_statement': bool,       # 有return语句？
+            'issues': [list]                    # 发现的所有问题列表
+        }
+        """
+        import re
+        import ast
+
+        issues = []
+        result = {
+            'has_syntax_error': False,
+            'has_call_method': False,
+            'signature_correct': False,
+            'operators_used': [],
+            'operators_valid': False,
+            'operator_calls_valid': True,
+            'has_return_statement': False,
+            'issues': issues
+        }
+
+        # ===== Check 1: Syntax Error =====
+        try:
+            compile(code, '<string>', 'exec')
+        except SyntaxError as e:
+            result['has_syntax_error'] = True
+            issues.append(f"语法错误: {str(e)}")
+            return result
+
+        # ===== Check 2: Has async def __call__ =====
+        if 'async def __call__' not in code and 'def __call__' not in code:
+            issues.append("缺少 async def __call__ 方法")
+            return result
+
+        result['has_call_method'] = True
+
+        # ===== Check 3: Correct Signature =====
+        if problem_type == "math":
+            pattern = r'async\s+def\s+__call__\s*\(\s*self\s*,\s*problem\s*:\s*str\s*\)'
+            if re.search(pattern, code):
+                result['signature_correct'] = True
+            else:
+                issues.append(f"MATH问题的签名错误。应该是: async def __call__(self, problem: str)")
+        elif problem_type == "code":
+            pattern = r'async\s+def\s+__call__\s*\(\s*self\s*,\s*problem\s*:\s*str\s*,\s*entry_point\s*:\s*str\s*,\s*test\s*:\s*str\s*\)'
+            if re.search(pattern, code):
+                result['signature_correct'] = True
+            else:
+                issues.append(f"CODE问题的签名错误。应该是: async def __call__(self, problem: str, entry_point: str, test: str)")
+        elif problem_type == "qa":
+            pattern = r'async\s+def\s+__call__\s*\(\s*self\s*,\s*problem\s*:\s*str\s*\)'
+            if re.search(pattern, code):
+                result['signature_correct'] = True
+            else:
+                issues.append(f"QA问题的签名错误。应该是: async def __call__(self, problem: str)")
+
+        # ===== Check 4: Extract operators used =====
+        operator_keywords = {
+            'answer_generate': r'await\s+self\.answer_generate\s*\(',
+            'programmer': r'await\s+self\.programmer\s*\(',
+            'test': r'await\s+self\.test\s*\(',
+            'review': r'await\s+self\.review\s*\(',
+            'revise': r'await\s+self\.revise\s*\(',
+            'scensemble': r'await\s+self\.scensemble\s*\(',
+            'custom': r'await\s+self\.custom\s*\(',
+        }
+
+        for op_name, op_pattern in operator_keywords.items():
+            if re.search(op_pattern, code):
+                result['operators_used'].append(op_name)
+
+        # ===== Check 5: Operators valid for problem type =====
+        valid_operators = {
+            'math': ['answer_generate', 'review', 'revise', 'scensemble', 'custom'],
+            'code': ['programmer', 'test', 'review', 'revise', 'custom'],
+            'qa': ['answer_generate', 'review', 'revise', 'scensemble', 'custom'],
+        }
+
+        invalid_ops = [op for op in result['operators_used'] if op not in valid_operators.get(problem_type, [])]
+        if invalid_ops:
+            result['operators_valid'] = False
+            for op in invalid_ops:
+                issues.append(f"❌ Operator '{op}' 不适合 {problem_type} 问题")
+        else:
+            if result['operators_used']:  # 有operators且都有效
+                result['operators_valid'] = True
+
+        # ===== Check 6: Operator call parameters =====
+        # 检查常见的参数错误
+        param_checks = [
+            (r'answer_generate\s*\(\s*problem\s*=', "answer_generate: 应该用 'input' 参数，不是 'problem'"),
+            (r'review\s*\(\s*solution\s*=(?![^)]*problem)', "review: 缺少 'problem' 参数"),
+            (r'revise\s*\(\s*(?!.*problem)(?!.*solution)(?!.*feedback)', "revise: 缺少必要参数（problem/solution/feedback）"),
+            (r'test\s*\(\s*(?!.*entry_point)', "test: 缺少 'entry_point' 参数"),
+        ]
+
+        for pattern, error_msg in param_checks:
+            # 这是简化的检查，避免复杂的正则
+            if re.search(pattern, code):
+                issues.append(f"⚠️  {error_msg}")
+                result['operator_calls_valid'] = False
+
+        # ===== Check 7: Has return statement =====
+        # 检查是否有return语句返回元组
+        if re.search(r'return\s+\w+\s*,\s*self\.llm', code) or re.search(r'return\s+\(.*?,.*?\)', code):
+            result['has_return_statement'] = True
+        else:
+            issues.append("⚠️  缺少或错误的 return 语句（应返回 (result, cost) 元组）")
+
+        return result
+
     def _extract_code_block(self, generated_text: str) -> str:
         """
-        从生成的文本中提取Python代码块
+        从生成的文本中提取Python代码块 - 多策略提取，确保鲁棒性
 
         支持格式：
-        1. Markdown代码块：```python ... ```
-        2. 简单代码块：``` ... ```
+        1. Markdown: ```python ... ```
+        2. Markdown: ``` ... ``` (flexible newlines)
         3. 纯代码（没有包裹）
+        4. class Workflow 定义
+        5. def __call__ 方法体
+
+        策略：尝试多种模式，逐步降低严格性，确保总能提取到代码
         """
         import re
 
-        # 尝试提取markdown代码块
-        # Pattern 1: ```python ... ```
-        python_pattern = r'```python\s*\n(.*?)\n```'
-        match = re.search(python_pattern, generated_text, re.DOTALL)
-        if match:
-            return match.group(1).strip()
+        # ===== Strategy 1: Markdown ```python...``` with flexible spacing =====
+        # 支持 ```python\n...``` 和 ```python...``` 两种格式
+        patterns_markdown_python = [
+            r'```python\s*\n(.*?)\n```',  # ```python\n...code...\n```
+            r'```python\s*(.*?)\n```',    # ```python...code...\n```
+            r'```python\s*\n(.*?)```',    # ```python\n...code...```
+            r'```python\s*(.*?)```',      # ```python...code...```
+        ]
 
-        # Pattern 2: ``` ... ```
-        general_pattern = r'```\s*\n(.*?)\n```'
-        match = re.search(general_pattern, generated_text, re.DOTALL)
-        if match:
-            return match.group(1).strip()
+        for pattern in patterns_markdown_python:
+            match = re.search(pattern, generated_text, re.DOTALL)
+            if match:
+                code = match.group(1).strip()
+                if code:
+                    return code
 
-        # Pattern 3: 查找class Workflow定义
-        class_pattern = r'(class\s+Workflow\s*:.*?(?=\n\n|\Z))'
+        # ===== Strategy 2: Markdown ```...``` with flexible spacing =====
+        patterns_markdown_general = [
+            r'```\s*\n(.*?)\n```',        # ```\n...code...\n```
+            r'```\s*(.*?)\n```',          # ```...code...\n```
+            r'```\s*\n(.*?)```',          # ```\n...code...```
+            r'```\s*(.*?)```',            # ```...code...```
+        ]
+
+        for pattern in patterns_markdown_general:
+            match = re.search(pattern, generated_text, re.DOTALL)
+            if match:
+                code = match.group(1).strip()
+                # 过滤掉明显的非代码文本
+                if not code.startswith(('Here', 'This', 'The', 'For', 'In', 'We')):
+                    if code and any(kw in code for kw in ['def', 'class', 'await', 'async', 'return']):
+                        return code
+
+        # ===== Strategy 3: Look for class Workflow definition =====
+        class_pattern = r'class\s+Workflow\s*:.*?(?=\n(?:class|def\s+\w+\s*\(|\Z))'
         match = re.search(class_pattern, generated_text, re.DOTALL)
         if match:
-            # 找到class开始位置
-            start_pos = match.start()
-            # 获取class之后的所有内容
-            code_after_class = generated_text[start_pos:]
+            code = match.group(0).strip()
+            if code:
+                return code
 
-            # 尝试找到合适的结束点
-            lines = code_after_class.split('\n')
-            code_lines = []
-            indent_level = None
+        # ===== Strategy 4: Look for async def __call__ =====
+        call_pattern = r'async\s+def\s+__call__\s*\(.*?\):\s*(?:->.*?)?\n(.*?)(?=\n(?:async\s+def|def\s+\w+\s*\(|\Z))'
+        match = re.search(call_pattern, generated_text, re.DOTALL)
+        if match:
+            # 只提取方法体
+            method_body = match.group(1).strip()
+            # 需要返回完整的async def...，所以重新构建
+            match_full = re.search(r'(async\s+def\s+__call__\s*\(.*?\):.*?)(?=\n(?:async\s+def|def\s+\w+\s*\(|\Z))',
+                                  generated_text, re.DOTALL)
+            if match_full:
+                code = match_full.group(1).strip()
+                if code:
+                    return code
 
-            for line in lines:
-                # 如果是空行，继续
-                if not line.strip():
-                    code_lines.append(line)
-                    continue
+        # ===== Strategy 5: Extract lines containing code keywords =====
+        lines = generated_text.split('\n')
+        code_lines = []
+        in_code = False
 
-                # 获取当前行的缩进
-                current_indent = len(line) - len(line.lstrip())
+        for line in lines:
+            # 检查是否进入代码区域
+            if any(kw in line for kw in ['class Workflow', 'async def __call__', 'def __call__']):
+                in_code = True
 
-                # 如果这是第一行代码，记录缩进级别
-                if indent_level is None and line.strip().startswith(('class', 'def', 'import', 'from')):
-                    indent_level = current_indent
-
-                # 如果遇到同级或更小缩进（且不是空行），可能结束了
-                if indent_level is not None and current_indent <= indent_level - 4:
+            if in_code:
+                code_lines.append(line)
+                # 简单的启发式：连续空行表示代码结束
+                if len(code_lines) > 10 and line.strip() == '' and code_lines[-2].strip() == '':
+                    code_lines.pop()  # 移除最后的空行
                     break
 
-                code_lines.append(line)
+        if code_lines:
+            code = '\n'.join(code_lines).strip()
+            if code and len(code) > 50:  # 确保提取的代码有合理的长度
+                return code
 
-            return '\n'.join(code_lines)
-
-        # 如果都找不到，返回原文本（但去除前后的解释文字）
-        lines = generated_text.split('\n')
-        code_start = -1
-        code_end = len(lines)
-
-        for i, line in enumerate(lines):
-            if 'class Workflow' in line:
-                code_start = i
-                break
-
-        if code_start >= 0:
-            # 从class Workflow开始
-            return '\n'.join(lines[code_start:code_end])
-
-        # 最后尝试：如果文本包含Python代码特征，返回整个文本
-        if any(keyword in generated_text for keyword in ['class Workflow', 'def __call__', 'import', 'from']):
+        # ===== Strategy 6: Fallback - return all text if it looks like code =====
+        if any(keyword in generated_text for keyword in ['class Workflow', 'def __call__', 'async def', 'await', 'return']):
             return generated_text.strip()
 
+        # ===== Strategy 7: Last resort - empty string =====
         return ""
 
 
@@ -734,86 +1064,6 @@ def test_generator():
 
     print(f"\n📄 生成的工作流代码:")
     print(result['workflow_code'])
-
-
-def _extract_code_block(self, generated_text: str) -> str:
-        """
-        从生成的文本中提取Python代码块
-
-        支持格式：
-        1. Markdown代码块：```python ... ```
-        2. 简单代码块：``` ... ```
-        3. 纯代码（没有包裹）
-        """
-        import re
-
-        # 尝试提取markdown代码块
-        # Pattern 1: ```python ... ```
-        python_pattern = r'```python\s*\n(.*?)\n```'
-        match = re.search(python_pattern, generated_text, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-
-        # Pattern 2: ``` ... ```
-        general_pattern = r'```\s*\n(.*?)\n```'
-        match = re.search(general_pattern, generated_text, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-
-        # Pattern 3: 查找class Workflow定义
-        class_pattern = r'(class\s+Workflow\s*:.*?(?=\n\n|\Z))'
-        match = re.search(class_pattern, generated_text, re.DOTALL)
-        if match:
-            # 找到class开始位置
-            start_pos = match.start()
-            # 获取class之后的所有内容
-            code_after_class = generated_text[start_pos:]
-
-            # 尝试找到合适的结束点
-            lines = code_after_class.split('\n')
-            code_lines = []
-            indent_level = None
-
-            for line in lines:
-                # 如果是空行，继续
-                if not line.strip():
-                    code_lines.append(line)
-                    continue
-
-                # 获取当前行的缩进
-                current_indent = len(line) - len(line.lstrip())
-
-                # 如果这是第一行代码，记录缩进级别
-                if indent_level is None and line.strip().startswith(('class', 'def', 'import', 'from')):
-                    indent_level = current_indent
-
-                # 如果遇到同级或更小缩进（且不是空行），可能结束了
-                if indent_level is not None and current_indent <= indent_level - 4:
-                    break
-
-                code_lines.append(line)
-
-            return '\n'.join(code_lines)
-
-        # 如果都找不到，返回原文本（但去除前后的解释文字）
-        lines = generated_text.split('\n')
-        code_start = -1
-        code_end = len(lines)
-
-        for i, line in enumerate(lines):
-            if 'class Workflow' in line:
-                code_start = i
-                break
-
-        if code_start >= 0:
-            # 从class Workflow开始
-            return '\n'.join(lines[code_start:code_end])
-
-        # 最后尝试：如果文本包含Python代码特征，返回整个文本
-        if any(keyword in generated_text for keyword in ['class Workflow', 'def __call__', 'import', 'from']):
-            return generated_text.strip()
-
-        return ""
 
 
 if __name__ == "__main__":
