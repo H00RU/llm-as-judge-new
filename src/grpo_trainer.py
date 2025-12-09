@@ -394,12 +394,15 @@ class GRPOTrainer:
                 )
 
                 # Compute reward
-                reward = self.reward_computer.compute_reward(
-                    answer=answer,
+                reward_result = self.reward_computer.compute_reward(
+                    problem=problem,
+                    prediction=answer,
                     ground_truth=ground_truth,
                     problem_type=problem_type,
-                    metadata=metadata
+                    execution_metadata=metadata
                 )
+                # Extract float reward value from dict
+                reward = reward_result.get('reward', 0.0) if isinstance(reward_result, dict) else reward_result
 
                 return workflow_code, answer, reward, log_prob
 
@@ -867,11 +870,14 @@ class GRPOTrainer:
 
                 # 计算正确性
                 if metadata['success']:
-                    correctness = self.reward_computer._compute_correctness_reward(
+                    correctness_result = self.reward_computer.compute_reward(
+                        problem=problem,
                         prediction=answer,
                         ground_truth=ground_truth,
-                        problem_type=problem_type
+                        problem_type=problem_type,
+                        execution_metadata={'success': True}
                     )
+                    correctness = correctness_result.get('reward', 0.0) * 10.0  # Convert [0, 1] to [0, 10]
                     correctness_scores.append(correctness)
                     total_cost += cost
                     successful_executions += 1

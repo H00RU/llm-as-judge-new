@@ -287,7 +287,7 @@ Your problem is a CODE problem. Follow ALL constraints below strictly.
    Returns: {{'code': str, 'output': str}}
 
 2. self.test: Test code with test cases
-   Call: await self.test(problem=problem, solution=code, entry_point=entry_point, test=test)
+   Call: await self.test(problem=problem, solution=code, entry_point=entry_point)
    Returns: {{'result': bool, 'solution': str}}
 
 3. self.review: Review code quality
@@ -319,19 +319,23 @@ Parameters: problem: str, entry_point: str, test: str (EXACTLY 3 parameters)
 Returns: (result_string, cost_float)
 
 ================================================================================
-✅ CORRECT EXAMPLE (follow this pattern):
+✅ CORRECT EXAMPLE (follow this pattern - EXACT COPY):
 ================================================================================
 ```python
+# Save test parameter to instance variable (framework will use this automatically)
+self._test_input = test
+
 # Step 1: Generate code using Programmer
 code_result = await self.programmer(problem=problem, analysis='')
 code = code_result.get('code', '')
 
 # Step 2: Test the code with provided test cases
+# Note: test_result contains test counts (passed/total) that are automatically captured
 test_result = await self.test(
     problem=problem,
     solution=code,
     entry_point=entry_point,
-    test=test
+    test_loop=3
 )
 
 # Step 3: If tests pass, return the solution; otherwise review and revise
@@ -373,7 +377,7 @@ await self.test(problem=problem, solution=code)  # ❌ WRONG! Missing entry_poin
 
 WRONG #5: Not handling test results correctly
 ```python
-await self.test(problem=problem, solution=code, entry_point=entry_point, test=test)
+await self.test(problem=problem, solution=code, entry_point=entry_point, test_loop=3)
 # Returns immediately without checking result
 ```
 
@@ -807,7 +811,7 @@ class Workflow:
 
     async def __call__(self, problem: str):
         solution = await self.custom(input=problem, instruction="Solve this problem step by step.")
-        return solution['response'], self.llm.get_usage_summary()["total_cost"]
+        return solution['response'], self.llm.get_usage_summary().get("total_cost", 0.0)
 """
 
     def _validate_workflow_code(self, code: str, problem_type: str) -> Dict[str, bool]:

@@ -428,8 +428,14 @@ class AFlowExecutor:
             workflow_code = validated_code  # 使用验证后的代码
 
         try:
-            # 创建临时工作流模块
-            workflow_class = self._create_workflow_class(workflow_code, problem_type)
+            # 创建临时工作流模块（异步执行以避免阻塞事件循环）
+            loop = asyncio.get_event_loop()
+            workflow_class = await loop.run_in_executor(
+                None,
+                self._create_workflow_class,
+                workflow_code,
+                problem_type
+            )
 
             # 实例化工作流
             llm_config = self._get_llm_config()
@@ -451,6 +457,13 @@ class AFlowExecutor:
                 if problem_type == "code" and "entry_point" in kwargs:
                     print(f"  📋 执行CODE workflow: (problem, entry_point, test)")
                     # Check if test parameter is available
+                    test_param = kwargs.get("test", "")
+
+                    # 框架自动处理：保存test参数到workflow实例
+                    # 生成的Code workflow会自动通过覆盖的test()方法使用这个参数
+                    if hasattr(workflow, '_test_input'):
+                        workflow._test_input = test_param
+
                     if "test" in kwargs:
                         result = await asyncio.wait_for(
                             workflow(problem, kwargs["entry_point"], kwargs["test"]),
@@ -458,7 +471,6 @@ class AFlowExecutor:
                         )
                     else:
                         # Provide default empty test parameter if missing
-                        test_param = kwargs.get("test", "")
                         result = await asyncio.wait_for(
                             workflow(problem, kwargs["entry_point"], test_param),
                             timeout=self.timeout
@@ -511,6 +523,26 @@ class AFlowExecutor:
                     answer, cost = None, 0.0
             else:
                 answer, cost = result, 0.0
+
+            # ✨ NEW: Extract test results for code problems
+            test_results = None
+            if problem_type == "code":
+                # Check if answer is a dict with test results (from Test operator)
+                if isinstance(answer, dict):
+                    if 'passed' in answer and 'total' in answer:
+                        test_results = {
+                            'passed': answer.get('passed', 0),
+                            'total': answer.get('total', 0),
+                            'pass_rate': answer.get('pass_rate', 0.0)
+                        }
+                        # Extract actual solution from dict
+                        answer = answer.get('solution', answer.get('code', str(answer)))
+                        print(f"  📊 Test Results: {test_results['passed']}/{test_results['total']} passed ({test_results['pass_rate']:.1%})")
+
+                # Also check if workflow stored test results in instance variable
+                if hasattr(workflow, '_test_results') and test_results is None:
+                    test_results = workflow._test_results
+                    print(f"  📊 Test Results (from workflow): {test_results['passed']}/{test_results['total']} passed")
 
             # ✨ FIX 1: Cost 类型验证与颠倒检测（来自参考项目）
             # 问题：某些格式错误的workflow可能返回 (cost, answer) 而非 (answer, cost)
@@ -567,6 +599,10 @@ class AFlowExecutor:
                 "operator_problem_type_mismatch": mismatch_detected,
                 "mismatch_type": mismatch_details.split('\n')[0] if mismatch_details else None
             })
+
+            # ✨ NEW: Store test results in metadata for code problems
+            if test_results:
+                metadata['test_results'] = test_results
 
             if mismatch_detected:
                 print(f"  ⚠️  Workflow violates operator-problem constraint")

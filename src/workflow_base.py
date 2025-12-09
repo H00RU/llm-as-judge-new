@@ -77,6 +77,10 @@ class CodeWorkflowBase:
     - review: 审查代码
     - revise: 修订代码
     - custom: 自定义prompting
+
+    自动处理test参数映射：
+    - __call__中保存test参数到self._test_input
+    - 覆盖test()方法，自动传递test_string参数给Test操作符
     """
 
     def __init__(self, name: str, llm_config, dataset: DatasetType):
@@ -86,10 +90,13 @@ class CodeWorkflowBase:
 
         # 预初始化所有CODE类型的operators
         self.programmer = Programmer(self.llm)
-        self.test = Test(self.llm)
+        self._test_operator = Test(self.llm)  # 保存原始Test操作符
         self.review = Review(self.llm)
         self.revise = Revise(self.llm)
         self.custom = Custom(self.llm)
+
+        # 框架内部使用
+        self._test_input = None
 
         print(f"✅ CodeWorkflowBase initialized with 5 operators")
 
@@ -106,6 +113,22 @@ class CodeWorkflowBase:
             (solution, cost) tuple
         """
         raise NotImplementedError("Subclass must implement __call__ method")
+
+    async def test(self, problem, solution, entry_point, test_loop: int = 3, **kwargs):
+        """
+        覆盖test方法：自动添加test_string参数
+
+        框架自动从self._test_input提取test参数，不需要Qwen显式传递
+        """
+        # 自动添加test_string参数
+        return await self._test_operator(
+            problem=problem,
+            solution=solution,
+            entry_point=entry_point,
+            test_string=self._test_input,  # 框架自动从__call__保存的参数中获取
+            test_loop=test_loop,
+            **kwargs
+        )
 
 
 class QAWorkflowBase:
