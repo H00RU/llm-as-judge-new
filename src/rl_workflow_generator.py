@@ -561,7 +561,7 @@ BEGIN CODE GENERATION:
                 top_k=self.config.get('top_k', 50),
                 do_sample=True,
                 pad_token_id=self.tokenizer.eos_token_id,
-                use_cache=False  # ✅ Fix: Disable cache when gradient checkpointing is enabled
+                use_cache=True   # 🚀 Performance Fix: Enable caching for 10-20x speedup
             )
 
         # 解码
@@ -658,7 +658,7 @@ BEGIN CODE GENERATION:
                 eos_token_id=self.tokenizer.eos_token_id,
                 # 关键：使用num_beams=1避免beam search的额外开销
                 num_beams=1,
-                use_cache=False  # ✅ Fix: Disable cache when gradient checkpointing is enabled
+                use_cache=True   # 🚀 Performance Fix: Enable caching for 10-20x speedup
             )
 
         # 4. 批量解码和解析
@@ -875,6 +875,39 @@ class Workflow:
                 result['signature_correct'] = True
             else:
                 issues.append(f"QA问题的签名错误。应该是: async def __call__(self, problem: str)")
+
+        # ===== Check 3.5: Verify operator initialization =====
+        # 生成的代码应该从基类继承所有operators，但需要验证它们确实被使用
+        # 如果生成的code中出现 `self.llm`, `self.review` 等属性访问，说明基类初始化工作正常
+        init_keywords = {
+            'llm': r'self\.llm',  # 所有问题类型都需要 llm
+            'review': r'self\.review',  # MATH 和 QA 需要 review
+            'revise': r'self\.revise',  # MATH 和 QA 需要 revise
+            'programmer': r'self\.programmer',  # CODE 需要 programmer
+            'test': r'self\.test',  # CODE 需要 test
+            'answer_generate': r'self\.answer_generate',  # MATH 和 QA 需要
+        }
+
+        # 记录初始化的operators
+        initialized_operators = []
+        for op_name, op_pattern in init_keywords.items():
+            if re.search(op_pattern, code):
+                initialized_operators.append(op_name)
+
+        # 验证问题类型所需的operators是否都被初始化了
+        required_operators = {
+            'math': ['llm', 'review', 'revise'],
+            'code': ['llm', 'programmer', 'test'],
+            'qa': ['llm', 'review', 'revise'],
+        }
+
+        missing_operators = []
+        for req_op in required_operators.get(problem_type, []):
+            if req_op not in initialized_operators:
+                missing_operators.append(req_op)
+
+        if missing_operators:
+            issues.append(f"⚠️  缺少必需的operators初始化: {', '.join(missing_operators)}")
 
         # ===== Check 4: Extract operators used =====
         operator_keywords = {

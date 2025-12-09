@@ -301,6 +301,135 @@ class GRPOTrainer:
         # ✨ Log GPU memory after model loading
         self._log_gpu_memory("Model Loaded")
 
+    async def _process_sample_batch_parallel(self, batch, num_sequences, current_temp):
+        """
+        🚀 Performance Fix: Parallel processing of workflow generation and execution
+        Processes multiple samples concurrently using asyncio.gather
+        """
+        import asyncio
+        from tqdm import tqdm
+
+        # Create a semaphore to limit concurrent API calls (avoid rate limiting)
+        semaphore = asyncio.Semaphore(8)  # Max 8 concurrent workflows
+
+        async def process_single_sample_with_semaphore(sample):
+            async with semaphore:
+                return await self._process_single_sample(sample, num_sequences, current_temp)
+
+        # Process all samples in parallel
+        print(f"\n🚀 Parallel processing {len(batch)} samples with {num_sequences} sequences each")
+        results = await asyncio.gather(
+            *[process_single_sample_with_semaphore(sample) for sample in batch],
+            return_exceptions=True
+        )
+
+        # Collect successful results and handle exceptions
+        all_workflows = []
+        all_answers = []
+        all_rewards = []
+        all_log_probs = []
+        all_problem_types = []
+        all_ground_truths = []
+
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                print(f"⚠️ Sample {i} failed: {result}")
+                continue
+
+            workflows, answers, rewards, log_probs, problem_types, ground_truths = result
+            all_workflows.extend(workflows)
+            all_answers.extend(answers)
+            all_rewards.extend(rewards)
+            all_log_probs.extend(log_probs)
+            all_problem_types.extend(problem_types)
+            all_ground_truths.extend(ground_truths)
+
+        return all_workflows, all_answers, all_rewards, all_log_probs, all_problem_types, all_ground_truths
+
+    async def _process_single_sample(self, sample, num_sequences, current_temp):
+        """Process a single sample and generate multiple workflows"""
+        problem = sample['problem']
+        ground_truth = sample['ground_truth']
+        problem_type = sample['problem_type']
+
+        # Storage for this sample's workflows
+        workflows = []
+        answers = []
+        rewards = []
+        log_probs = []
+        problem_types = []
+        ground_truths = []
+
+        # Process all sequences for this sample in parallel
+        async def process_single_sequence(i):
+            # Build dynamic prompt if enabled
+            custom_prompt = None
+            if self.use_dynamic_prompts:
+                custom_prompt = self.prompt_optimizer.build_dynamic_prompt(
+                    problem=problem,
+                    problem_type=problem_type
+                )
+
+            # Generate workflow
+            result = self.generator.generate_workflow(
+                problem=problem,
+                problem_type=problem_type,
+                temperature=current_temp,
+                custom_prompt=custom_prompt
+            )
+
+            workflow_code = result['workflow_code']
+
+            # Compute log probability
+            log_prob = await self._compute_log_prob(problem, workflow_code, problem_type)
+
+            # Execute workflow
+            try:
+                answer, cost, metadata = await self.executor.execute_workflow(
+                    workflow_code=workflow_code,
+                    problem=problem,
+                    problem_type=problem_type,
+                    entry_point=sample.get('entry_point', ''),
+                    test=sample.get('test', '')
+                )
+
+                # Compute reward
+                reward = self.reward_computer.compute_reward(
+                    answer=answer,
+                    ground_truth=ground_truth,
+                    problem_type=problem_type,
+                    metadata=metadata
+                )
+
+                return workflow_code, answer, reward, log_prob
+
+            except Exception as e:
+                print(f"⚠️ Workflow execution failed: {e}")
+                # Return failure values
+                return workflow_code, "", 0.0, log_prob
+
+        # Process all sequences in parallel
+        sequence_results = await asyncio.gather(
+            *[process_single_sequence(i) for i in range(num_sequences)],
+            return_exceptions=True
+        )
+
+        # Collect results
+        for result in sequence_results:
+            if isinstance(result, Exception):
+                print(f"⚠️ Sequence failed: {result}")
+                continue
+
+            workflow, answer, reward, log_prob = result
+            workflows.append(workflow)
+            answers.append(answer)
+            rewards.append(reward)
+            log_probs.append(log_prob)
+            problem_types.append(problem_type)
+            ground_truths.append(ground_truth)
+
+        return workflows, answers, rewards, log_probs, problem_types, ground_truths
+
     def _log_gpu_memory(self, stage: str):
         """Log current GPU memory usage
 
@@ -355,159 +484,32 @@ class GRPOTrainer:
 
         num_sequences = self.config['num_return_sequences_in_group']
 
-        for sample_idx, sample in enumerate(tqdm(batch, desc="生成和执行工作流"), 1):
-            problem = sample['problem']
-            ground_truth = sample['ground_truth']
-            problem_type = sample['problem_type']
+        # 🚀 Performance Fix: Use parallel processing instead of sequential
+        print(f"\n🚀 Using parallel processing for {len(batch)} samples")
 
-            # GRPO组
-            group_workflows = []
-            group_answers = []
-            group_rewards = []
-            group_log_probs = []
-            group_correctness = []
+        # Call parallel processing method
+        all_workflows, all_answers, all_rewards, all_log_probs, all_problem_types, all_ground_truths = \
+            await self._process_sample_batch_parallel(batch, num_sequences, current_temp)
 
-            for i in range(num_sequences):
-                # 构建动态提示词（如果启用）
-                custom_prompt = None
-                if self.use_dynamic_prompts:
-                    custom_prompt = self.prompt_optimizer.build_dynamic_prompt(
-                        problem=problem,
-                        problem_type=problem_type
-                    )
+        # Create problems list for backward compatibility
+        all_problems = [s['problem'] for s in batch for _ in range(num_sequences)]
 
-                # 生成工作流
-                result = self.generator.generate_workflow(
-                    problem=problem,
-                    problem_type=problem_type,
-                    temperature=current_temp,  # 使用动态temperature
-                    custom_prompt=custom_prompt
-                )
+        # Calculate correctness scores for metrics
+        correctness_scores = [reward for reward in all_rewards]
 
-                workflow_code = result['workflow_code']
-
-                # 计算log概率（旧策略）
-                log_prob = await self._compute_log_prob(problem, workflow_code, problem_type)
-
-                # 执行工作流
-                try:
-                    answer, cost, metadata = await self.executor.execute_workflow(
-                        workflow_code=workflow_code,
-                        problem=problem,
-                        problem_type=problem_type,
-                        entry_point=sample.get('entry_point', ''),
-                        test=sample.get('test', '')  # NEW: pass test cases for HumanEval
-                    )
-
-                    # ✨ PHASE 1: NEW 5-tier reward system with fine-grained feedback
-                    # RewardComputer v2 returns:
-                    # - reward: [0.0, 0.2, 0.4, 0.7, 1.0] (5 tiers)
-                    # - tier: 1-5 (tier level)
-                    # - breakdown: detailed metrics per problem type
-
-                    metadata['step'] = step  # 记录当前step
-
-                    reward_result = self.reward_computer.compute_reward(
-                        problem=problem,
-                        prediction=answer,
-                        ground_truth=ground_truth,
-                        problem_type=problem_type,
-                        metadata=metadata,
-                        execution_metadata=metadata
-                    )
-
-                    # ✨ Extract 5-tier reward (replaces old [-1.0, 1.0] scale)
-                    reward = reward_result['reward']  # [0.0, 0.2, 0.4, 0.7, 1.0]
-                    tier = reward_result['tier']      # 1-5
-                    breakdown = reward_result.get('breakdown', {})
-
-                    # Map new 5-tier to training threshold (tier 4+ = success)
-                    correctness = 1.0 if reward >= 0.7 else (reward / 0.7)
-                    correctness_scores.append(correctness)
-                    group_correctness.append(correctness)
-
-                    # 根据奖励值判断状态并打印
-                    if metadata.get('operator_problem_type_mismatch', False):
-                        mismatch_type = metadata.get('mismatch_type', 'Unknown')
-                        print(f"  ⚠️  Operator-problem type mismatch ({mismatch_type}) → 奖励 {reward:.2f}")
-                        wandb.log({
-                            f"sample/{problem_type}/operator_mismatch": 1,
-                            f"sample/{problem_type}/reward": reward,
-                            f"sample/step": step,
-                        })
-                    elif metadata.get('validation_failed', False):
-                        validation_error = metadata.get('validation_error', 'Unknown')
-                        print(f"  ⚠️  验证失败 ({validation_error[:30]}) → 奖励 {reward:.2f}")
-                        wandb.log({
-                            f"sample/{problem_type}/validation_failed": 1,
-                            f"sample/{problem_type}/reward": reward,
-                            f"sample/step": step,
-                        })
-                    elif not metadata.get('success', False):
-                        error_type = metadata.get('error_type', 'unknown')
-                        error_desc = metadata.get('error', 'unknown_error')[:30]
-                        print(f"  ❌ 执行失败 ({error_type}: {error_desc}) → 奖励 {reward:.2f} | 真值: {str(ground_truth)[:50]}")
-                        wandb.log({
-                            f"sample/{problem_type}/execution_failed": 1,
-                            f"sample/{problem_type}/error_type/{error_type}": 1,
-                            f"sample/{problem_type}/reward": reward,
-                            f"sample/step": step,
-                        })
-                    else:
-                        # 执行成功情况
-                        is_correct = correctness >= 0.5  # 归一化后，>0.5表示正确倾向
-                        status_icon = "✅" if is_correct else "❌"
-                        print(f"  {status_icon} 答案质量: {correctness:.2f} | 总奖励: {reward:.2f} | 预测: {str(answer)[:50]} | 真值: {str(ground_truth)[:50]}")
-                        wandb.log({
-                            f"sample/{problem_type}/correctness": correctness,
-                            f"sample/{problem_type}/reward": reward,
-                            f"sample/step": step,
-                            f"sample/sample_id": sample_idx * 4 + i,
-                        })
-
-                except Exception as e:
-                    print(f"  ⚠️  执行错误: {type(e).__name__}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    answer = None
-                    reward = -1.0  # ✅ 统一归一化：异常也使用[-1.0, 1.0]范围
-                    correctness_scores.append(-1.0)
-                    group_correctness.append(-1.0)
-
-                group_workflows.append(workflow_code)
-                group_answers.append(answer)
-                group_rewards.append(reward)
-                group_log_probs.append(log_prob)
-
-            # GRPO关键：组内奖励归一化
-            mean_reward = np.mean(group_rewards)
-            group_advantages = [r - mean_reward for r in group_rewards]
-
-            # 💾 收集高质量样本到ExperienceBuffer
-            for idx, (workflow, answer, reward) in enumerate(zip(group_workflows, group_answers, group_rewards)):
-                # 只收集原始奖励高的样本（非advantage）
-                if reward >= self.experience_buffer.reward_threshold:
-                    sample = {
-                        'problem': problem,
-                        'workflow_code': workflow,
-                        'answer': answer,
-                        'ground_truth': ground_truth,
-                        'reward': reward,
-                        'correctness_score': correctness_scores[-len(group_rewards) + idx] if correctness_scores else 0,
-                        'metadata': {
-                            'problem_type': problem_type,
-                            'step': step
-                        },
-                        'step': step
-                    }
-                    self.experience_buffer.add_sample(sample, problem_type)
-
-            # 收集
-            all_workflows.extend(group_workflows)
-            all_problems.extend([problem] * num_sequences)
-            all_answers.extend(group_answers)
-            all_rewards.extend(group_advantages)  # 使用优势
-            all_log_probs.extend(group_log_probs)
+        # Add samples to experience buffer (if they meet threshold)
+        for i, (workflow, answer, reward, problem_type, ground_truth) in enumerate(zip(all_workflows, all_answers, all_rewards, all_problem_types, all_ground_truths)):
+            if reward >= self.experience_buffer.reward_threshold:
+                sample = {
+                    'problem': all_problems[i],
+                    'workflow_code': workflow,
+                    'answer': answer,
+                    'ground_truth': ground_truth,
+                    'reward': reward,
+                    'correctness_score': reward,
+                    'metadata': {'step': step}
+                }
+                self.experience_buffer.add_sample(sample, problem_type)
 
         # 3. 策略梯度更新
         print(f"\n🔄 更新策略...")
@@ -670,9 +672,11 @@ class GRPOTrainer:
         microbatch_size = self.config.get('forward_pass_microbatch_size', 1)  # Default: 1 workflow at a time
         grad_accum_steps = self.config.get('gradient_accumulation_steps', 1)
 
-        # ✅ REFERENCE PROJECT FIX: Aggressive memory cleanup before policy update
-        torch.cuda.empty_cache()
-        gc.collect()
+        # 🚀 Performance Fix: Reduced memory cleanup frequency
+        # Only cleanup if memory usage is high (>80%) to avoid excessive interruptions
+        if torch.cuda.memory_allocated() / torch.cuda.max_memory_allocated() > 0.8:
+            torch.cuda.empty_cache()
+            gc.collect()
 
         # Process workflows in micro-batches
         for i in range(0, len(workflows), microbatch_size):
@@ -688,8 +692,8 @@ class GRPOTrainer:
                 advantage = advantages[j]
                 problem_type = problem_types[j]
 
-                # ✅ REFERENCE PROJECT FIX: Periodic cache cleanup (every 5 samples)
-                if j % 5 == 0:
+                # 🚀 Performance Fix: Reduced cleanup frequency (every 20 samples instead of 5)
+                if j % 20 == 0 and torch.cuda.memory_allocated() / torch.cuda.max_memory_allocated() > 0.8:
                     torch.cuda.empty_cache()
 
                 # 计算新log概率 WITH gradients

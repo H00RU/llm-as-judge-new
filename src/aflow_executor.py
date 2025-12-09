@@ -25,6 +25,21 @@ sys.path.insert(0, os.path.join(aflow_path, 'workspace'))
 # 导入AFlow组件
 from scripts.async_llm import create_llm_instance, LLMsConfig
 from scripts import operators as operator_module
+from scripts.evaluator import DatasetType
+
+# 导入Workflow基类（确保生成的code能正确继承）
+try:
+    from .workflow_base import (
+        MathWorkflowBase,
+        CodeWorkflowBase,
+        QAWorkflowBase
+    )
+except ImportError:
+    from workflow_base import (
+        MathWorkflowBase,
+        CodeWorkflowBase,
+        QAWorkflowBase
+    )
 
 
 class AFlowExecutor:
@@ -424,7 +439,7 @@ class AFlowExecutor:
                 print(f"⚠️  llm_config 为 None，降级为字符串: {self.llm_model_name}")
                 llm_config = self.llm_model_name
 
-            # 实例化工作流
+            # 实例化工作流 - 传递dataset参数（用于记录目的）
             workflow = workflow_class(
                 name="rl_generated_workflow",
                 llm_config=llm_config,
@@ -434,11 +449,20 @@ class AFlowExecutor:
             # 执行（带超时）- 简化版，不降级参数
             try:
                 if problem_type == "code" and "entry_point" in kwargs:
-                    print(f"  📋 执行CODE workflow: (problem, entry_point)")
-                    result = await asyncio.wait_for(
-                        workflow(problem, kwargs["entry_point"]),
-                        timeout=self.timeout
-                    )
+                    print(f"  📋 执行CODE workflow: (problem, entry_point, test)")
+                    # Check if test parameter is available
+                    if "test" in kwargs:
+                        result = await asyncio.wait_for(
+                            workflow(problem, kwargs["entry_point"], kwargs["test"]),
+                            timeout=self.timeout
+                        )
+                    else:
+                        # Provide default empty test parameter if missing
+                        test_param = kwargs.get("test", "")
+                        result = await asyncio.wait_for(
+                            workflow(problem, kwargs["entry_point"], test_param),
+                            timeout=self.timeout
+                        )
                 else:
                     # Math/QA problems or code without entry_point
                     print(f"  📋 执行{problem_type.upper()} workflow: (problem)")
@@ -472,19 +496,9 @@ class AFlowExecutor:
                 print(f"  完整堆栈:")
                 traceback.print_exc()
 
-                # 触发执行级fallback（如果启用）
-                if self.enable_fallback:
-                    print(f"  🔄 触发执行级fallback安全网")
-                    try:
-                        return await self._execute_fallback_workflow(
-                            workflow_code, problem, problem_type, **kwargs
-                        )
-                    except Exception as fallback_error:
-                        print(f"  ❌ Fallback也失败了: {fallback_error}")
-                        metadata['fallback_failed'] = True
-                        metadata['fallback_error'] = str(fallback_error)
-
-                # 如果没有fallback或fallback失败，抛出异常
+                # Fallback mechanism has been removed
+                # The missing _execute_fallback_workflow method was not implemented
+                # Instead, we directly raise the execution error for proper error handling
                 raise
 
             # 安全地解包结果（可能返回2个或更多值）
@@ -597,11 +611,14 @@ class AFlowExecutor:
 
         直接执行代码创建类，不进行任何修复或fallback
         """
-        # 准备命名空间
+        # 准备命名空间 - 包含base classes和所有必要的operators
         namespace = {
             "operator": operator_module,
             "create_llm_instance": create_llm_instance,
-            "DatasetType": str
+            # 添加Workflow基类供生成的code继承
+            "MathWorkflowBase": MathWorkflowBase,
+            "CodeWorkflowBase": CodeWorkflowBase,
+            "QAWorkflowBase": QAWorkflowBase,
         }
 
         # 替换import路径（使workspace路径可用）
@@ -613,6 +630,7 @@ class AFlowExecutor:
         # 修复常见typo（RL模型可能产生的错误）
         modified_code = modified_code.replace("async_lll", "async_llm")
         modified_code = modified_code.replace("create_lll_instance", "create_llm_instance")
+        modified_code = modified_code.replace("self.lll", "self.llm")  # 🚀 Fix common typo: lll → llm
 
         # 执行代码创建类
         exec(modified_code, namespace)
