@@ -99,19 +99,30 @@ class RewardComputer:
         # Step 0: Check for real execution errors - IMMEDIATE 0.0 reward with learning feedback
         execution_error = execution_metadata.get('execution_error')
         if execution_error:
-            # 真实执行错误，提供具体学习反馈
-            return {
-                'reward': 0.0,
-                'tier': 1,
-                'breakdown': {
-                    'reason': 'execution_failure',
-                    'error_type': execution_error.get('type'),
-                    'error_message': execution_error.get('message'),
-                    'learning_point': execution_error.get('learning_point'),
-                    'is_consistency_error': execution_error.get('is_consistency_error', False),
-                    'problem_type': problem_type
+            # Phase 3增强：根据错误类型提供细粒度的学习信号
+            error_type = execution_error.get('type')
+            error_msg = execution_error.get('message', '')
+
+            if error_type == 'AttributeError':
+                # 细分AttributeError：可能是缺少继承、super()未调用、或operator不存在
+                return self._handle_attribute_error(error_msg, problem_type)
+            elif error_type in ['TypeError', 'NameError']:
+                # 类型错误或名称错误：通常是参数错误或拼写错误
+                return self._handle_type_or_name_error(error_msg, problem_type)
+            else:
+                # 其他错误：使用通用处理
+                return {
+                    'reward': 0.0,
+                    'tier': 1,
+                    'breakdown': {
+                        'reason': 'execution_failure',
+                        'error_type': error_type,
+                        'error_message': error_msg,
+                        'learning_point': execution_error.get('learning_point'),
+                        'is_consistency_error': execution_error.get('is_consistency_error', False),
+                        'problem_type': problem_type
+                    }
                 }
-            }
 
         # Step 1: Check operator consistency violations (pre-execution check)
         validation_metadata = execution_metadata.get('validation_metadata', {})
@@ -627,3 +638,121 @@ class RewardComputer:
         else:
             reason = "代码质量差: " + "; ".join(issues) if issues else "代码质量差"
             return (score, reason)
+
+    def _handle_attribute_error(self, error_msg: str, problem_type: str) -> Dict:
+        """
+        细粒度的AttributeError处理
+
+        不同的AttributeError原因给予不同的学习指导：
+        - 缺少继承声明：class Workflow应该继承MathWorkflowBase等
+        - super()未调用：__init__应该调用super().__init__()
+        - operator不存在：使用的operator没有被初始化
+        """
+        error_msg_lower = error_msg.lower()
+
+        # Case 1: 缺少继承声明（特征：提到"workflow"或直接缺少attribute）
+        if "'nonetype' object" in error_msg_lower or 'self.' in error_msg_lower:
+            # 这通常表示self本身是None或缺少属性
+            if any(op in error_msg_lower for op in ['answer_generate', 'programmer', 'review', 'revise', 'test']):
+                base_class = {
+                    'math': 'MathWorkflowBase',
+                    'code': 'CodeWorkflowBase',
+                    'qa': 'QAWorkflowBase'
+                }.get(problem_type, 'MathWorkflowBase')
+
+                return {
+                    'reward': 0.0,
+                    'tier': 1,
+                    'breakdown': {
+                        'reason': 'missing_inheritance',
+                        'error': error_msg,
+                        'learning_message': '⚠️  代码缺少class继承声明或super()未调用',
+                        'instruction': f'MUST add: class Workflow({base_class}): and super().__init__(name, llm_config, dataset)',
+                        'error_category': 'code_structure',
+                        'error_priority': 'critical',
+                        'problem_type': problem_type
+                    }
+                }
+
+        # Case 2: super().__init__() 未调用
+        if 'super' in error_msg_lower or 'init' in error_msg_lower:
+            return {
+                'reward': 0.0,
+                'tier': 1,
+                'breakdown': {
+                    'reason': 'super_init_not_called',
+                    'error': error_msg,
+                    'learning_message': '⚠️  __init__方法必须调用 super().__init__()',
+                    'instruction': 'Add super().__init__(name, llm_config, dataset) at the beginning of __init__',
+                    'error_category': 'code_structure',
+                    'error_priority': 'critical',
+                    'problem_type': problem_type
+                }
+            }
+
+        # Case 3: Generic operator不存在或未初始化
+        return {
+            'reward': 0.0,
+            'tier': 1,
+            'breakdown': {
+                'reason': 'operator_not_initialized',
+                'error': error_msg,
+                'learning_message': '⚠️  Operator初始化失败或使用不一致',
+                'instruction': '检查: (1) class是否继承基类 (2) __init__是否调用super() (3) operator名称是否正确',
+                'error_category': 'operator_initialization',
+                'error_priority': 'critical',
+                'problem_type': problem_type
+            }
+        }
+
+    def _handle_type_or_name_error(self, error_msg: str, problem_type: str) -> Dict:
+        """
+        处理TypeError和NameError
+
+        通常是参数错误或拼写错误
+        """
+        error_msg_lower = error_msg.lower()
+
+        # 判断是哪种错误
+        if 'got an unexpected keyword argument' in error_msg_lower:
+            return {
+                'reward': 0.0,
+                'tier': 1,
+                'breakdown': {
+                    'reason': 'operator_parameter_error',
+                    'error': error_msg,
+                    'learning_message': '⚠️  Operator调用参数名错误',
+                    'instruction': '检查operator的参数名是否正确（例如：answer_generate应该用input=，不是problem=）',
+                    'error_category': 'operator_parameters',
+                    'error_priority': 'major',
+                    'problem_type': problem_type
+                }
+            }
+        elif 'not defined' in error_msg_lower or 'undefined' in error_msg_lower:
+            return {
+                'reward': 0.0,
+                'tier': 1,
+                'breakdown': {
+                    'reason': 'name_error',
+                    'error': error_msg,
+                    'learning_message': '⚠️  变量或函数未定义或拼写错误',
+                    'instruction': '检查变量名拼写是否正确，以及是否所有变量都已定义',
+                    'error_category': 'syntax_or_naming',
+                    'error_priority': 'major',
+                    'problem_type': problem_type
+                }
+            }
+        else:
+            return {
+                'reward': 0.0,
+                'tier': 1,
+                'breakdown': {
+                    'reason': 'parameter_or_syntax_error',
+                    'error': error_msg,
+                    'learning_message': '⚠️  Operator调用参数错误或拼写错误',
+                    'instruction': '检查operator的参数名和调用方式是否正确',
+                    'error_category': 'operator_or_syntax',
+                    'error_priority': 'major',
+                    'problem_type': problem_type
+                }
+            }

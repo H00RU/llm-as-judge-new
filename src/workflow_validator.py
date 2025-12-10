@@ -135,6 +135,109 @@ class WorkflowValidator:
         for op in invalid_ops:
             errors.append(f"❌ Operator '{op}' 不适合 {problem_type} 问题")
 
+        # Phase 2增强：添加参数验证、继承验证、初始化验证
+        param_errors = self._validate_operator_parameters(code, problem_type, used_operators)
+        errors.extend(param_errors)
+
+        inheritance_errors = self._validate_class_inheritance(code, problem_type)
+        errors.extend(inheritance_errors)
+
+        init_errors = self._validate_init_call(code)
+        errors.extend(init_errors)
+
+        return errors
+
+    def _validate_operator_parameters(self, code: str, problem_type: str, used_operators: List[str]) -> List[str]:
+        """
+        验证operator调用的参数是否正确
+
+        检查内容：
+        1. answer_generate是否使用了错误的参数名(problem=而不是input=)
+        2. review是否同时有problem和solution参数
+        3. test是否有entry_point参数（for CODE）
+        """
+        errors = []
+
+        # Check 1: answer_generate parameter
+        if 'answer_generate' in used_operators:
+            # 检查是否有 answer_generate(problem=...) 这样的错误调用
+            if re.search(r'answer_generate\s*\(\s*problem\s*=', code):
+                errors.append("❌ answer_generate: 参数应该是 'input='，不是 'problem='")
+
+        # Check 2: review parameters
+        if 'review' in used_operators:
+            # 查找所有 review(...) 调用
+            review_calls = re.findall(r'review\s*\([^)]*\)', code)
+            for call in review_calls:
+                # 检查是否有 problem 参数
+                if 'problem' not in call:
+                    errors.append("❌ review: 缺少必需的 'problem=' 参数")
+                    break
+
+        # Check 3: test parameters (for CODE)
+        if problem_type == 'code' and 'test' in used_operators:
+            test_calls = re.findall(r'test\s*\([^)]*\)', code)
+            for call in test_calls:
+                if 'entry_point' not in call:
+                    errors.append("❌ test: 缺少必需的 'entry_point=' 参数")
+                    break
+                if 'problem' not in call:
+                    errors.append("❌ test: 缺少必需的 'problem=' 参数")
+                    break
+
+        return errors
+
+    def _validate_class_inheritance(self, code: str, problem_type: str) -> List[str]:
+        """
+        验证class是否正确继承了基类
+
+        检查内容：
+        1. 是否有 'class Workflow' 定义
+        2. 是否继承了正确的基类（MathWorkflowBase/CodeWorkflowBase/QAWorkflowBase）
+        """
+        errors = []
+
+        # 定义基类映射
+        base_class_mapping = {
+            'math': 'MathWorkflowBase',
+            'code': 'CodeWorkflowBase',
+            'qa': 'QAWorkflowBase'
+        }
+        expected_base_class = base_class_mapping.get(problem_type, 'MathWorkflowBase')
+
+        # Check 1: 是否有class Workflow定义
+        if not re.search(r'class\s+Workflow', code):
+            errors.append(f"❌ 缺少 'class Workflow' 定义")
+            return errors
+
+        # Check 2: 是否继承了正确的基类
+        inheritance_pattern = r'class\s+Workflow\s*\(\s*([^)]+)\s*\)'
+        inheritance_match = re.search(inheritance_pattern, code)
+
+        if inheritance_match:
+            inherited_class = inheritance_match.group(1).strip()
+            if expected_base_class not in inherited_class:
+                errors.append(f"❌ Workflow应该继承 '{expected_base_class}'，而不是 '{inherited_class}'")
+        else:
+            errors.append(f"❌ class Workflow 缺少继承声明，应该继承 '{expected_base_class}'")
+
+        return errors
+
+    def _validate_init_call(self, code: str) -> List[str]:
+        """
+        验证__init__是否调用了super().__init__()
+
+        检查内容：
+        1. 如果有 def __init__，必须调用 super().__init__(name, llm_config, dataset)
+        """
+        errors = []
+
+        # 检查是否有 def __init__ 定义
+        if 'def __init__' in code:
+            # 检查是否调用了 super().__init__
+            if 'super().__init__' not in code:
+                errors.append("❌ __init__ 方法必须调用 super().__init__(name, llm_config, dataset)")
+
         return errors
 
     def _check_logic_feasibility(self, code: str, problem_type: str) -> List[str]:

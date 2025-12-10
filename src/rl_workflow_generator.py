@@ -155,41 +155,88 @@ class RLWorkflowGenerator:
 
         if problem_type == "math":
             return f"""================================================================================
-🎯 TASK: Generate __call__ method for MATH problem workflow
+🎯 TASK: Generate COMPLETE class for MATH problem workflow
 ================================================================================
 
 *** CRITICAL: PROBLEM TYPE = MATH ***
 Your problem is a MATH problem. Follow ALL constraints below strictly.
 
 ================================================================================
+⚠️  CRITICAL CODE STRUCTURE (MUST FOLLOW EXACTLY):
+================================================================================
+
+You MUST generate a COMPLETE Python class with:
+
+1. ✅ Class definition line (REQUIRED):
+   class Workflow(MathWorkflowBase):
+
+2. ✅ __init__ method (REQUIRED):
+   def __init__(self, name: str, llm_config, dataset: DatasetType):
+       super().__init__(name, llm_config, dataset)
+
+3. ✅ __call__ method (REQUIRED):
+   async def __call__(self, problem: str) -> Tuple[str, float]:
+       # Your workflow logic here
+       # All operators (answer_generate, review, etc.) are automatically available from base class
+
+================================================================================
+❌ WRONG: Generating only method body without class definition:
+```python
+async def __call__(self, problem: str):
+    ans = await self.answer_generate(input=problem)
+    ...
+```
+This will FAIL because operators are not initialized!
+
+✅ RIGHT: Complete class with inheritance:
+```python
+class Workflow(MathWorkflowBase):
+    def __init__(self, name: str, llm_config, dataset: DatasetType):
+        super().__init__(name, llm_config, dataset)
+
+    async def __call__(self, problem: str) -> Tuple[str, float]:
+        ans = await self.answer_generate(input=problem)
+        ...
+        return answer, cost
+```
+================================================================================
+
+================================================================================
+⚙️  OPERATOR INTERFACE REFERENCE (call operators EXACTLY like this):
+================================================================================
+
+1. self.answer_generate(input: str) -> dict with keys 'thought', 'answer'
+   ❌ WRONG: await self.answer_generate(problem=problem)
+   ✅ RIGHT: await self.answer_generate(input=problem)
+
+2. self.review(problem: str, solution: str) -> dict with keys 'review_result', 'feedback'
+   ❌ WRONG: await self.review(solution=answer)  # Missing 'problem'
+   ✅ RIGHT: await self.review(problem=problem, solution=answer)
+
+3. self.revise(problem: str, solution: str, feedback: str) -> dict with key 'solution'
+   ❌ WRONG: await self.revise(solution=answer, feedback=feedback)
+   ✅ RIGHT: await self.revise(problem=problem, solution=answer, feedback=feedback)
+
+4. self.scensemble(solutions: List[str], problem: str) -> dict with key 'response'
+   ✅ RIGHT: await self.scensemble(solutions=[answer1, answer2], problem=problem)
+
+5. self.custom(input: str, instruction: str) -> dict with key 'response'
+   ✅ RIGHT: await self.custom(input=problem, instruction="custom instruction")
+
+================================================================================
 ✅ OPERATORS YOU CAN USE (for MATH only):
 ================================================================================
-1. self.answer_generate: Generate step-by-step solution
-   Call: await self.answer_generate(input=problem)
-   Returns: {{'thought': str, 'answer': str}}
-
-2. self.review: Review and validate answer
-   Call: await self.review(problem=problem, solution=solution)
-   Returns: {{'review_result': bool, 'feedback': str}}
-
-3. self.revise: Revise solution based on feedback
-   Call: await self.revise(problem=problem, solution=solution, feedback=feedback)
-   Returns: {{'solution': str}}
-
-4. self.scensemble: Self-consistency ensemble (for multiple solutions)
-   Call: await self.scensemble(solutions=solutions, problem=problem)
-   Returns: {{'response': str}}
-
-5. self.custom: Custom prompting (for special cases only)
-   Call: await self.custom(input=input, instruction=instruction)
-   Returns: {{'response': str}}
+- self.answer_generate: Generate step-by-step solution
+- self.review: Review and validate answer
+- self.revise: Revise solution based on feedback
+- self.scensemble: Self-consistency ensemble (for multiple solutions)
+- self.custom: Custom prompting (for special cases only)
 
 ================================================================================
 ❌ OPERATORS YOU MUST NOT USE (for MATH problems):
 ================================================================================
 - self.programmer: This is for CODE problems, NOT MATH!
 - self.test: This is for CODE problems, NOT MATH!
-Do NOT import or initialize any of these operators.
 
 ================================================================================
 📋 REQUIRED SIGNATURE:
@@ -201,49 +248,53 @@ Parameters: only 'problem: str'
 Returns: (answer_string, cost_float)
 
 ================================================================================
-✅ CORRECT EXAMPLE (follow this pattern):
+✅ COMPLETE CORRECT EXAMPLE (follow exactly):
 ================================================================================
 ```python
-# Step 1: Generate initial answer
-ans = await self.answer_generate(input=problem)
-answer = ans.get('answer', '')
+class Workflow(MathWorkflowBase):
+    def __init__(self, name: str, llm_config, dataset: DatasetType):
+        super().__init__(name, llm_config, dataset)
 
-# Step 2: Review the answer
-review = await self.review(problem=problem, solution=answer)
+    async def __call__(self, problem: str) -> Tuple[str, float]:
+        # Step 1: Generate initial answer
+        ans = await self.answer_generate(input=problem)
+        answer = ans.get('answer', '')
 
-# Step 3: If feedback suggests revision, revise
-if not review.get('review_result', True):
-    revised = await self.revise(
-        problem=problem,
-        solution=answer,
-        feedback=review.get('feedback', '')
-    )
-    answer = revised.get('solution', answer)
+        # Step 2: Review the answer
+        review = await self.review(problem=problem, solution=answer)
 
-# Step 4: Return answer and cost
-return answer, self.llm.get_usage_summary().get("total_cost", 0.0)
+        # Step 3: If feedback suggests revision, revise
+        if not review.get('review_result', True):
+            revised = await self.revise(
+                problem=problem,
+                solution=answer,
+                feedback=review.get('feedback', '')
+            )
+            answer = revised.get('solution', answer)
+
+        # Step 4: Return answer and cost
+        return answer, self.llm.get_usage_summary().get("total_cost", 0.0)
 ```
 
 ================================================================================
 ❌ WRONG EXAMPLES (DO NOT DO THIS):
 ================================================================================
-WRONG #1: Using Programmer/Test operators
+WRONG #1: Only method body, no class definition
+```python
+async def __call__(self, problem: str):  # ❌ Missing class definition!
+    ans = await self.answer_generate(input=problem)
+```
+
+WRONG #2: Wrong inheritance or missing super()
+```python
+class Workflow:  # ❌ Missing inheritance: should be class Workflow(MathWorkflowBase)
+    def __init__(self, name, llm_config, dataset):
+        # ❌ Missing: super().__init__(name, llm_config, dataset)
+```
+
+WRONG #3: Using Programmer/Test operators
 ```python
 code = await self.programmer(problem=problem)  # ❌ WRONG! Use answer_generate instead
-result = await self.test(code)                 # ❌ WRONG! test is only for CODE problems
-```
-
-WRONG #2: Wrong signature
-```python
-async def __call__(self, problem: str, test: str):  # ❌ WRONG! test parameter not allowed
-async def __call__(self, problem: str, entry_point: str, test: str):  # ❌ WRONG! Too many params
-```
-
-WRONG #3: Missing return statement
-```python
-ans = await self.answer_generate(input=problem)
-answer = ans.get('answer', '')
-# ❌ WRONG! No return statement
 ```
 
 WRONG #4: Incorrect operator call parameters
@@ -260,54 +311,101 @@ await self.review(solution=answer)           # ❌ WRONG! Must include 'problem'
 ================================================================================
 📝 INSTRUCTIONS:
 ================================================================================
-1. Generate ONLY the __call__ method body code (no imports, no class definition, no __init__)
-2. Start directly with the logic inside the async def __call__(self, problem: str): method
-3. Follow the CORRECT EXAMPLE pattern above
-4. Use ONLY the 5 allowed operators
-5. Never use Programmer or Test operators
-6. Ensure the method returns (answer, cost) tuple
-7. Handle operator responses with .get() to avoid KeyError
+1. Generate a COMPLETE class with class definition, __init__, and __call__ (NOT just method body)
+2. MUST inherit from MathWorkflowBase: class Workflow(MathWorkflowBase):
+3. MUST call super().__init__() in __init__ method
+4. Follow the CORRECT EXAMPLE pattern above EXACTLY
+5. Use ONLY the 5 allowed operators
+6. Never use Programmer or Test operators
+7. Call operators with the EXACT parameter names shown in "OPERATOR INTERFACE REFERENCE"
+8. Ensure the method returns (answer, cost) tuple
 
 BEGIN CODE GENERATION:
 """
 
         elif problem_type == "code":
             return f"""================================================================================
-🎯 TASK: Generate __call__ method for CODE problem workflow
+🎯 TASK: Generate COMPLETE class for CODE problem workflow
 ================================================================================
 
 *** CRITICAL: PROBLEM TYPE = CODE ***
 Your problem is a CODE problem. Follow ALL constraints below strictly.
 
 ================================================================================
+⚠️  CRITICAL CODE STRUCTURE (MUST FOLLOW EXACTLY):
+================================================================================
+
+You MUST generate a COMPLETE Python class with:
+
+1. ✅ Class definition line (REQUIRED):
+   class Workflow(CodeWorkflowBase):
+
+2. ✅ __init__ method (REQUIRED):
+   def __init__(self, name: str, llm_config, dataset: DatasetType):
+       super().__init__(name, llm_config, dataset)
+
+3. ✅ __call__ method (REQUIRED):
+   async def __call__(self, problem: str, entry_point: str, test: str) -> Tuple[str, float]:
+       # Your workflow logic here
+       # All operators (programmer, test, review, etc.) are automatically available from base class
+
+================================================================================
+❌ WRONG: Generating only method body without class definition:
+```python
+async def __call__(self, problem: str, entry_point: str, test: str):
+    code_result = await self.programmer(problem=problem, analysis='')
+    ...
+```
+This will FAIL because operators are not initialized!
+
+✅ RIGHT: Complete class with inheritance:
+```python
+class Workflow(CodeWorkflowBase):
+    def __init__(self, name: str, llm_config, dataset: DatasetType):
+        super().__init__(name, llm_config, dataset)
+
+    async def __call__(self, problem: str, entry_point: str, test: str) -> Tuple[str, float]:
+        code_result = await self.programmer(problem=problem, analysis='')
+        ...
+        return code, cost
+```
+================================================================================
+
+================================================================================
+⚙️  OPERATOR INTERFACE REFERENCE (call operators EXACTLY like this):
+================================================================================
+
+1. self.programmer(problem: str, analysis: str) -> dict with keys 'code', 'output'
+   ✅ RIGHT: await self.programmer(problem=problem, analysis='')
+
+2. self.test(problem: str, solution: str, entry_point: str, test_loop: int) -> dict with 'result', 'solution'
+   ✅ RIGHT: await self.test(problem=problem, solution=code, entry_point=entry_point, test_loop=3)
+
+3. self.review(problem: str, solution: str) -> dict with keys 'review_result', 'feedback'
+   ❌ WRONG: await self.review(solution=code)  # Missing 'problem'
+   ✅ RIGHT: await self.review(problem=problem, solution=code)
+
+4. self.revise(problem: str, solution: str, feedback: str) -> dict with key 'solution'
+   ❌ WRONG: await self.revise(solution=code, feedback=feedback)
+   ✅ RIGHT: await self.revise(problem=problem, solution=code, feedback=feedback)
+
+5. self.custom(input: str, instruction: str) -> dict with key 'response'
+   ✅ RIGHT: await self.custom(input=problem, instruction="custom instruction")
+
+================================================================================
 ✅ OPERATORS YOU CAN USE (for CODE only):
 ================================================================================
-1. self.programmer: Generate and execute Python code
-   Call: await self.programmer(problem=problem, analysis=analysis)
-   Returns: {{'code': str, 'output': str}}
-
-2. self.test: Test code with test cases
-   Call: await self.test(problem=problem, solution=code, entry_point=entry_point)
-   Returns: {{'result': bool, 'solution': str}}
-
-3. self.review: Review code quality
-   Call: await self.review(problem=problem, solution=code)
-   Returns: {{'review_result': bool, 'feedback': str}}
-
-4. self.revise: Revise code based on feedback
-   Call: await self.revise(problem=problem, solution=code, feedback=feedback)
-   Returns: {{'solution': str}}
-
-5. self.custom: Custom prompting (for special cases only)
-   Call: await self.custom(input=input, instruction=instruction)
-   Returns: {{'response': str}}
+- self.programmer: Generate and execute Python code
+- self.test: Test code with test cases
+- self.review: Review code quality
+- self.revise: Revise code based on feedback
+- self.custom: Custom prompting (for special cases only)
 
 ================================================================================
 ❌ OPERATORS YOU MUST NOT USE (for CODE problems):
 ================================================================================
 - self.answer_generate: This is for MATH/QA problems, NOT CODE!
 - self.scensemble: This is for MATH/QA problems, NOT CODE!
-Do NOT import or initialize any of these operators.
 
 ================================================================================
 📋 REQUIRED SIGNATURE:
@@ -319,66 +417,65 @@ Parameters: problem: str, entry_point: str, test: str (EXACTLY 3 parameters)
 Returns: (result_string, cost_float)
 
 ================================================================================
-✅ CORRECT EXAMPLE (follow this pattern - EXACT COPY):
+✅ COMPLETE CORRECT EXAMPLE (follow exactly):
 ================================================================================
 ```python
-# Save test parameter to instance variable (framework will use this automatically)
-self._test_input = test
+class Workflow(CodeWorkflowBase):
+    def __init__(self, name: str, llm_config, dataset: DatasetType):
+        super().__init__(name, llm_config, dataset)
 
-# Step 1: Generate code using Programmer
-code_result = await self.programmer(problem=problem, analysis='')
-code = code_result.get('code', '')
+    async def __call__(self, problem: str, entry_point: str, test: str) -> Tuple[str, float]:
+        # Save test parameter to instance variable (framework will use this automatically)
+        self._test_input = test
 
-# Step 2: Test the code with provided test cases
-# Note: test_result contains test counts (passed/total) that are automatically captured
-test_result = await self.test(
-    problem=problem,
-    solution=code,
-    entry_point=entry_point,
-    test_loop=3
-)
+        # Step 1: Generate code using Programmer
+        code_result = await self.programmer(problem=problem, analysis='')
+        code = code_result.get('code', '')
 
-# Step 3: If tests pass, return the solution; otherwise review and revise
-if test_result.get('result', False):
-    return test_result.get('solution', code), self.llm.get_usage_summary().get("total_cost", 0.0)
-else:
-    # Optionally review and revise
-    review = await self.review(problem=problem, solution=code)
-    if not review.get('review_result', True):
-        revised = await self.revise(problem=problem, solution=code, feedback=review.get('feedback', ''))
-        code = revised.get('solution', code)
-    return code, self.llm.get_usage_summary().get("total_cost", 0.0)
+        # Step 2: Test the code with provided test cases
+        test_result = await self.test(
+            problem=problem,
+            solution=code,
+            entry_point=entry_point,
+            test_loop=3
+        )
+
+        # Step 3: If tests pass, return the solution; otherwise review and revise
+        if test_result.get('result', False):
+            return test_result.get('solution', code), self.llm.get_usage_summary().get("total_cost", 0.0)
+        else:
+            # Optionally review and revise
+            review = await self.review(problem=problem, solution=code)
+            if not review.get('review_result', True):
+                revised = await self.revise(problem=problem, solution=code, feedback=review.get('feedback', ''))
+                code = revised.get('solution', code)
+            return code, self.llm.get_usage_summary().get("total_cost", 0.0)
 ```
 
 ================================================================================
 ❌ WRONG EXAMPLES (DO NOT DO THIS):
 ================================================================================
-WRONG #1: Using AnswerGenerate/ScEnsemble operators
+WRONG #1: Only method body, no class definition
+```python
+async def __call__(self, problem: str, entry_point: str, test: str):  # ❌ Missing class definition!
+    code_result = await self.programmer(problem=problem, analysis='')
+```
+
+WRONG #2: Wrong inheritance or missing super()
+```python
+class Workflow:  # ❌ Missing inheritance: should be class Workflow(CodeWorkflowBase)
+    def __init__(self, name, llm_config, dataset):
+        # ❌ Missing: super().__init__(name, llm_config, dataset)
+```
+
+WRONG #3: Using AnswerGenerate/ScEnsemble operators
 ```python
 ans = await self.answer_generate(input=problem)  # ❌ WRONG! Use programmer instead
 ```
 
-WRONG #2: Wrong signature (not 3 parameters)
-```python
-async def __call__(self, problem: str):  # ❌ WRONG! Missing entry_point and test
-async def __call__(self, problem: str, entry_point: str):  # ❌ WRONG! Missing test
-```
-
-WRONG #3: Not returning execution result
-```python
-code_result = await self.programmer(problem=problem, analysis='')
-return code_result.get('code', '')  # ❌ WRONG! Should return test result, not code
-```
-
-WRONG #4: Missing test parameters
+WRONG #4: Missing test parameters or wrong order
 ```python
 await self.test(problem=problem, solution=code)  # ❌ WRONG! Missing entry_point and test
-```
-
-WRONG #5: Not handling test results correctly
-```python
-await self.test(problem=problem, solution=code, entry_point=entry_point, test_loop=3)
-# Returns immediately without checking result
 ```
 
 ================================================================================
@@ -389,55 +486,103 @@ await self.test(problem=problem, solution=code, entry_point=entry_point, test_lo
 ================================================================================
 📝 INSTRUCTIONS:
 ================================================================================
-1. Generate ONLY the __call__ method body code (no imports, no class definition, no __init__)
-2. Start directly with the logic inside the async def __call__(self, problem: str, entry_point: str, test: str): method
-3. Follow the CORRECT EXAMPLE pattern above
-4. Use ONLY the 5 allowed operators
-5. Never use AnswerGenerate or ScEnsemble operators
-6. Ensure __call__ accepts exactly 3 parameters: problem, entry_point, test
-7. Ensure the method returns (result, cost) tuple
-8. Always test the code using self.test() operator
+1. Generate a COMPLETE class with class definition, __init__, and __call__ (NOT just method body)
+2. MUST inherit from CodeWorkflowBase: class Workflow(CodeWorkflowBase):
+3. MUST call super().__init__() in __init__ method
+4. Follow the CORRECT EXAMPLE pattern above EXACTLY
+5. Use ONLY the 5 allowed operators
+6. Never use AnswerGenerate or ScEnsemble operators
+7. Call operators with the EXACT parameter names shown in "OPERATOR INTERFACE REFERENCE"
+8. Ensure __call__ accepts exactly 3 parameters: problem, entry_point, test
+9. Ensure the method returns (result, cost) tuple
 
 BEGIN CODE GENERATION:
 """
 
         elif problem_type == "qa":
             return f"""================================================================================
-🎯 TASK: Generate __call__ method for QA problem workflow
+🎯 TASK: Generate COMPLETE class for QA problem workflow
 ================================================================================
 
 *** CRITICAL: PROBLEM TYPE = QA ***
 Your problem is a QA (Question Answering) problem. Follow ALL constraints below strictly.
 
 ================================================================================
+⚠️  CRITICAL CODE STRUCTURE (MUST FOLLOW EXACTLY):
+================================================================================
+
+You MUST generate a COMPLETE Python class with:
+
+1. ✅ Class definition line (REQUIRED):
+   class Workflow(QAWorkflowBase):
+
+2. ✅ __init__ method (REQUIRED):
+   def __init__(self, name: str, llm_config, dataset: DatasetType):
+       super().__init__(name, llm_config, dataset)
+
+3. ✅ __call__ method (REQUIRED):
+   async def __call__(self, problem: str) -> Tuple[str, float]:
+       # Your workflow logic here
+       # All operators (answer_generate, review, etc.) are automatically available from base class
+
+================================================================================
+❌ WRONG: Generating only method body without class definition:
+```python
+async def __call__(self, problem: str):
+    ans = await self.answer_generate(input=problem)
+    ...
+```
+This will FAIL because operators are not initialized!
+
+✅ RIGHT: Complete class with inheritance:
+```python
+class Workflow(QAWorkflowBase):
+    def __init__(self, name: str, llm_config, dataset: DatasetType):
+        super().__init__(name, llm_config, dataset)
+
+    async def __call__(self, problem: str) -> Tuple[str, float]:
+        ans = await self.answer_generate(input=problem)
+        ...
+        return answer, cost
+```
+================================================================================
+
+================================================================================
+⚙️  OPERATOR INTERFACE REFERENCE (call operators EXACTLY like this):
+================================================================================
+
+1. self.answer_generate(input: str) -> dict with keys 'thought', 'answer'
+   ❌ WRONG: await self.answer_generate(problem=problem)
+   ✅ RIGHT: await self.answer_generate(input=problem)
+
+2. self.review(problem: str, solution: str) -> dict with keys 'review_result', 'feedback'
+   ❌ WRONG: await self.review(solution=answer)  # Missing 'problem'
+   ✅ RIGHT: await self.review(problem=problem, solution=answer)
+
+3. self.revise(problem: str, solution: str, feedback: str) -> dict with key 'solution'
+   ❌ WRONG: await self.revise(solution=answer, feedback=feedback)
+   ✅ RIGHT: await self.revise(problem=problem, solution=answer, feedback=feedback)
+
+4. self.scensemble(solutions: List[str], problem: str) -> dict with key 'response'
+   ✅ RIGHT: await self.scensemble(solutions=[answer1, answer2], problem=problem)
+
+5. self.custom(input: str, instruction: str) -> dict with key 'response'
+   ✅ RIGHT: await self.custom(input=problem, instruction="custom instruction")
+
+================================================================================
 ✅ OPERATORS YOU CAN USE (for QA only):
 ================================================================================
-1. self.answer_generate: Generate answer with reasoning
-   Call: await self.answer_generate(input=problem)
-   Returns: {{'thought': str, 'answer': str}}
-
-2. self.review: Review and validate answer
-   Call: await self.review(problem=problem, solution=answer)
-   Returns: {{'review_result': bool, 'feedback': str}}
-
-3. self.revise: Revise answer based on feedback
-   Call: await self.revise(problem=problem, solution=answer, feedback=feedback)
-   Returns: {{'solution': str}}
-
-4. self.scensemble: Self-consistency ensemble (for multiple candidate answers)
-   Call: await self.scensemble(solutions=solutions, problem=problem)
-   Returns: {{'response': str}}
-
-5. self.custom: Custom prompting (for special cases only)
-   Call: await self.custom(input=input, instruction=instruction)
-   Returns: {{'response': str}}
+- self.answer_generate: Generate answer with reasoning
+- self.review: Review and validate answer
+- self.revise: Revise answer based on feedback
+- self.scensemble: Self-consistency ensemble (for multiple candidate answers)
+- self.custom: Custom prompting (for special cases only)
 
 ================================================================================
 ❌ OPERATORS YOU MUST NOT USE (for QA problems):
 ================================================================================
 - self.programmer: This is for CODE problems, NOT QA!
 - self.test: This is for CODE problems, NOT QA!
-Do NOT import or initialize any of these operators.
 
 ================================================================================
 📋 REQUIRED SIGNATURE:
@@ -449,53 +594,59 @@ Parameters: only 'problem: str'
 Returns: (answer_string, cost_float)
 
 ================================================================================
-✅ CORRECT EXAMPLE (follow this pattern):
+✅ COMPLETE CORRECT EXAMPLE (follow exactly):
 ================================================================================
 ```python
-# Step 1: Generate answer with reasoning
-ans = await self.answer_generate(input=problem)
-answer = ans.get('answer', '')
+class Workflow(QAWorkflowBase):
+    def __init__(self, name: str, llm_config, dataset: DatasetType):
+        super().__init__(name, llm_config, dataset)
 
-# Step 2: Optionally review the answer
-review = await self.review(problem=problem, solution=answer)
+    async def __call__(self, problem: str) -> Tuple[str, float]:
+        # Step 1: Generate answer with reasoning
+        ans = await self.answer_generate(input=problem)
+        answer = ans.get('answer', '')
 
-# Step 3: If feedback suggests revision, revise
-if not review.get('review_result', True):
-    revised = await self.revise(
-        problem=problem,
-        solution=answer,
-        feedback=review.get('feedback', '')
-    )
-    answer = revised.get('solution', answer)
+        # Step 2: Optionally review the answer
+        review = await self.review(problem=problem, solution=answer)
 
-# Step 4: Return answer and cost
-return answer, self.llm.get_usage_summary().get("total_cost", 0.0)
+        # Step 3: If feedback suggests revision, revise
+        if not review.get('review_result', True):
+            revised = await self.revise(
+                problem=problem,
+                solution=answer,
+                feedback=review.get('feedback', '')
+            )
+            answer = revised.get('solution', answer)
+
+        # Step 4: Return answer and cost
+        return answer, self.llm.get_usage_summary().get("total_cost", 0.0)
 ```
 
 ================================================================================
 ❌ WRONG EXAMPLES (DO NOT DO THIS):
 ================================================================================
-WRONG #1: Using Programmer/Test operators
+WRONG #1: Only method body, no class definition
+```python
+async def __call__(self, problem: str):  # ❌ Missing class definition!
+    ans = await self.answer_generate(input=problem)
+```
+
+WRONG #2: Wrong inheritance or missing super()
+```python
+class Workflow:  # ❌ Missing inheritance: should be class Workflow(QAWorkflowBase)
+    def __init__(self, name, llm_config, dataset):
+        # ❌ Missing: super().__init__(name, llm_config, dataset)
+```
+
+WRONG #3: Using Programmer/Test operators
 ```python
 code = await self.programmer(problem=problem)  # ❌ WRONG! Use answer_generate instead
-result = await self.test(code)                 # ❌ WRONG! test is only for CODE problems
 ```
 
-WRONG #2: Wrong signature
+WRONG #4: Incorrect operator call parameters
 ```python
-async def __call__(self, problem: str, test: str):  # ❌ WRONG! test parameter not allowed
-async def __call__(self, problem: str, entry_point: str):  # ❌ WRONG! entry_point not for QA
-```
-
-WRONG #3: Not returning answer
-```python
-ans = await self.answer_generate(input=problem)
-# ❌ WRONG! Missing return statement
-```
-
-WRONG #4: Wrong operator parameters
-```python
-await self.answer_generate(problem=problem)  # ❌ WRONG! Should be 'input', not 'problem'
+await self.answer_generate(problem=problem)  # ❌ WRONG! Parameter should be 'input', not 'problem'
+await self.review(solution=answer)           # ❌ WRONG! Must include 'problem' parameter
 ```
 
 ================================================================================
@@ -506,13 +657,14 @@ await self.answer_generate(problem=problem)  # ❌ WRONG! Should be 'input', not
 ================================================================================
 📝 INSTRUCTIONS:
 ================================================================================
-1. Generate ONLY the __call__ method body code (no imports, no class definition, no __init__)
-2. Start directly with the logic inside the async def __call__(self, problem: str): method
-3. Follow the CORRECT EXAMPLE pattern above
-4. Use ONLY the 5 allowed operators
-5. Never use Programmer or Test operators
-6. Ensure the method returns (answer, cost) tuple
-7. Handle operator responses with .get() to avoid KeyError
+1. Generate a COMPLETE class with class definition, __init__, and __call__ (NOT just method body)
+2. MUST inherit from QAWorkflowBase: class Workflow(QAWorkflowBase):
+3. MUST call super().__init__() in __init__ method
+4. Follow the CORRECT EXAMPLE pattern above EXACTLY
+5. Use ONLY the 5 allowed operators
+6. Never use Programmer or Test operators
+7. Call operators with the EXACT parameter names shown in "OPERATOR INTERFACE REFERENCE"
+8. Ensure the method returns (answer, cost) tuple
 
 BEGIN CODE GENERATION:
 """
@@ -756,6 +908,12 @@ BEGIN CODE GENERATION:
                 print(f"  Issues Detected:")
                 for issue in quality_check['issues']:
                     print(f"    - {issue}")
+
+            # Phase 1 修复（根本性修复 - 在执行前自动修复代码结构问题）
+            print(f"\n🔧 应用根本性代码修复 (Phase 1)...")
+            code = self._enforce_correct_structure(code, problem_type)
+            code = self._fix_operator_calls(code, problem_type)
+            print(f"✅ 代码修复完成，现在验证...")
 
             # 3. 使用WorkflowValidator进行验证
             print(f"\n🔧 使用WorkflowValidator进行验证...")
@@ -1066,6 +1224,171 @@ class Workflow:
 
         # ===== Strategy 7: Last resort - empty string =====
         return ""
+
+    def _enforce_correct_structure(self, code: str, problem_type: str) -> str:
+        """
+        强制修复代码结构缺陷，确保：
+        1. 有 class Workflow(BaseClass) 继承声明
+        2. 有正确的 __init__ 调用 super().__init__()
+        3. 有 async def __call__() 方法
+
+        这是根本性修复，不是补丁
+        """
+        import re
+
+        # Step 0: 如果已经有完整的class定义，直接返回
+        base_class = self._get_base_class_name(problem_type)
+        if re.search(rf'class\s+Workflow\s*\(\s*{base_class}\s*\):', code):
+            if 'super().__init__' in code:
+                return code  # 已经是正确的结构
+
+        # Step 1: 检查是否完全缺少class定义
+        if not re.search(r'class\s+Workflow', code):
+            print(f"⚠️  代码缺少class定义，进行修复...")
+            # 提取 __call__ 方法体
+            call_match = re.search(r'async\s+def\s+__call__\s*\([^)]*\)\s*(?:->\s*[^\:]+)?\s*:', code)
+
+            if call_match:
+                # 找到方法体的开始位置
+                method_start = call_match.end()
+                call_body = code[method_start:].strip()
+                # 重新构建为完整的class
+                fixed_code = self._wrap_in_class(call_body, problem_type, base_class)
+                return fixed_code
+            else:
+                # 如果连 __call__ 都找不到，返回原始代码并标记
+                return code
+
+        # Step 2: 检查class继承是否正确
+        inheritance_pattern = rf'class\s+Workflow\s*\([^)]*\)'
+        inheritance_match = re.search(inheritance_pattern, code)
+
+        if inheritance_match:
+            # 检查是否继承了正确的基类
+            if base_class not in inheritance_match.group(0):
+                print(f"⚠️  class继承错误，修复为: {base_class}")
+                code = re.sub(
+                    rf'class\s+Workflow\s*\([^)]*\)',
+                    f'class Workflow({base_class})',
+                    code
+                )
+
+        # Step 3: 检查 __init__ 是否调用了 super().__init__()
+        if 'def __init__' in code:
+            if 'super().__init__' not in code:
+                print(f"⚠️  __init__ 缺少super()调用，进行修复...")
+                # 在 __init__ 方法体的开始处添加 super().__init__() 调用
+                code = re.sub(
+                    r'(def __init__\s*\([^)]*\)\s*:\s*\n)',
+                    r'\1        super().__init__(name, llm_config, dataset)\n',
+                    code
+                )
+
+        return code
+
+    def _fix_operator_calls(self, code: str, problem_type: str) -> str:
+        """
+        自动修复常见的operator调用参数错误
+
+        Examples:
+        - answer_generate(problem=...) -> answer_generate(input=...)
+        - review(solution=...) without problem -> review(problem=..., solution=...)
+        """
+        import re
+
+        # Fix 1: answer_generate 参数 - 所有问题类型都可能用到
+        if problem_type in ['math', 'qa']:
+            # answer_generate(problem=...) 应该是 answer_generate(input=...)
+            code = re.sub(
+                r'answer_generate\s*\(\s*problem\s*=',
+                'answer_generate(input=',
+                code
+            )
+            # answer_generate(x) 应该改为 answer_generate(input=x)
+            code = re.sub(
+                r'answer_generate\s*\(\s*([a-zA-Z_]\w*)\s*\)(?![=\w])',
+                r'answer_generate(input=\1)',
+                code
+            )
+
+        # Fix 2: review 参数 - 必须有 problem 和 solution
+        # review(solution=...) -> review(problem=..., solution=...)
+        code = re.sub(
+            r'review\s*\(\s*solution\s*=\s*([^,\)]+)\s*\)(?![=\w])',
+            r'review(problem=problem, solution=\1)',
+            code
+        )
+
+        # review(x) -> review(problem=problem, solution=x)
+        code = re.sub(
+            r'review\s*\(\s*([a-zA-Z_]\w*)\s*\)(?![=\w])',
+            r'review(problem=problem, solution=\1)',
+            code
+        )
+
+        # Fix 3: revise 参数 - 必须有 problem, solution, feedback
+        # revise(solution=..., feedback=...) -> revise(problem=..., solution=..., feedback=...)
+        code = re.sub(
+            r'revise\s*\(\s*solution\s*=',
+            r'revise(problem=problem, solution=',
+            code
+        )
+
+        # Fix 4: test 参数（CODE问题） - 必须有 problem, solution, entry_point
+        if problem_type == 'code':
+            # test(solution=..., entry_point=...) -> test(problem=..., solution=..., entry_point=...)
+            code = re.sub(
+                r'test\s*\(\s*solution\s*=',
+                r'test(problem=problem, solution=',
+                code
+            )
+
+        # Fix 5: scensemble 参数（MATH/QA）- 必须有 solutions 和 problem
+        if problem_type in ['math', 'qa']:
+            # scensemble(x) -> scensemble(solutions=x, problem=problem)
+            code = re.sub(
+                r'scensemble\s*\(\s*([a-zA-Z_]\w*)\s*\)(?![=\w])',
+                r'scensemble(solutions=\1, problem=problem)',
+                code
+            )
+
+        return code
+
+    def _get_base_class_name(self, problem_type: str) -> str:
+        """获取问题类型对应的基类名"""
+        mapping = {
+            'math': 'MathWorkflowBase',
+            'code': 'CodeWorkflowBase',
+            'qa': 'QAWorkflowBase'
+        }
+        return mapping.get(problem_type, 'MathWorkflowBase')
+
+    def _wrap_in_class(self, call_body: str, problem_type: str, base_class: str) -> str:
+        """将方法体包装在完整的class定义中"""
+        signature = self._get_call_signature(problem_type)
+
+        wrapped_code = f"""class Workflow({base_class}):
+    def __init__(self, name: str, llm_config, dataset: DatasetType):
+        super().__init__(name, llm_config, dataset)
+
+    async def {signature}:
+{self._indent_code(call_body, 8)}
+"""
+        return wrapped_code
+
+    def _get_call_signature(self, problem_type: str) -> str:
+        """获取问题类型对应的 __call__ 签名"""
+        if problem_type == "code":
+            return "__call__(self, problem: str, entry_point: str, test: str) -> Tuple[str, float]"
+        else:  # math, qa
+            return "__call__(self, problem: str) -> Tuple[str, float]"
+
+    def _indent_code(self, code: str, spaces: int) -> str:
+        """为代码块添加缩进"""
+        indent = ' ' * spaces
+        lines = code.split('\n')
+        indented_lines = [indent + line if line.strip() else line for line in lines]
+        return '\n'.join(indented_lines)
 
 
 def test_generator():
