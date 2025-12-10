@@ -189,56 +189,103 @@ class WorkflowValidator:
 
     def _validate_class_inheritance(self, code: str, problem_type: str) -> List[str]:
         """
-        验证class是否正确继承了基类
+        验证class结构（自包含架构，无继承）
 
         检查内容：
-        1. 是否有 'class Workflow' 定义
-        2. 是否继承了正确的基类（MathWorkflowBase/CodeWorkflowBase/QAWorkflowBase）
+        1. 是否有 'class Workflow:' 定义（无继承）
+        2. 是否有 __init__ 方法
+        3. 是否初始化了 self.llm
         """
         errors = []
-
-        # 定义基类映射
-        base_class_mapping = {
-            'math': 'MathWorkflowBase',
-            'code': 'CodeWorkflowBase',
-            'qa': 'QAWorkflowBase'
-        }
-        expected_base_class = base_class_mapping.get(problem_type, 'MathWorkflowBase')
 
         # Check 1: 是否有class Workflow定义
         if not re.search(r'class\s+Workflow', code):
             errors.append(f"❌ 缺少 'class Workflow' 定义")
             return errors
 
-        # Check 2: 是否继承了正确的基类
+        # Check 2: 确保没有使用旧的继承模式（如果有，给出警告）
         inheritance_pattern = r'class\s+Workflow\s*\(\s*([^)]+)\s*\)'
         inheritance_match = re.search(inheritance_pattern, code)
-
         if inheritance_match:
             inherited_class = inheritance_match.group(1).strip()
-            if expected_base_class not in inherited_class:
-                errors.append(f"❌ Workflow应该继承 '{expected_base_class}'，而不是 '{inherited_class}'")
-        else:
-            errors.append(f"❌ class Workflow 缺少继承声明，应该继承 '{expected_base_class}'")
+            if 'WorkflowBase' in inherited_class:
+                errors.append(f"⚠️  检测到旧的继承模式 '{inherited_class}'，应使用自包含架构（class Workflow:）")
+
+        # Check 3: 是否有 __init__ 方法
+        if 'def __init__' not in code:
+            errors.append("❌ 缺少 __init__ 方法")
+            return errors
+
+        # Check 4: 是否初始化了 self.llm
+        if 'self.llm = create_llm_instance' not in code:
+            errors.append("❌ __init__ 中缺少 'self.llm = create_llm_instance(llm_config)'")
 
         return errors
 
     def _validate_init_call(self, code: str) -> List[str]:
         """
-        验证__init__是否调用了super().__init__()
+        验证__init__中的operator初始化（自包含架构）
 
         检查内容：
-        1. 如果有 def __init__，必须调用 super().__init__(name, llm_config, dataset)
+        1. 检查是否初始化了使用的operators
+        2. 不再检查super()调用（自包含架构不需要）
         """
         errors = []
 
         # 检查是否有 def __init__ 定义
-        if 'def __init__' in code:
-            # 检查是否调用了 super().__init__
-            if 'super().__init__' not in code:
-                errors.append("❌ __init__ 方法必须调用 super().__init__(name, llm_config, dataset)")
+        if 'def __init__' not in code:
+            return errors
+
+        # 查找使用的operators
+        used_operators = self._find_used_operators(code)
+
+        # 查找初始化的operators
+        initialized_operators = self._find_initialized_operators(code)
+
+        # 检查：使用的operators是否都已初始化
+        missing = set(used_operators) - set(initialized_operators)
+        if missing:
+            errors.append(f"❌ Operators使用但未初始化: {', '.join(missing)}")
 
         return errors
+
+    def _find_used_operators(self, code: str) -> List[str]:
+        """查找在__call__中使用的operators"""
+        operator_keywords = {
+            'answer_generate': r'self\.answer_generate\s*\(',
+            'programmer': r'self\.programmer\s*\(',
+            'test': r'self\.test\s*\(',
+            'review': r'self\.review\s*\(',
+            'revise': r'self\.revise\s*\(',
+            'scensemble': r'self\.scensemble\s*\(',
+            'custom': r'self\.custom\s*\(',
+        }
+
+        used = []
+        for op_name, pattern in operator_keywords.items():
+            if re.search(pattern, code):
+                used.append(op_name)
+
+        return used
+
+    def _find_initialized_operators(self, code: str) -> List[str]:
+        """查找在__init__中初始化的operators"""
+        patterns = {
+            'answer_generate': r'self\.answer_generate\s*=\s*AnswerGenerate',
+            'programmer': r'self\.programmer\s*=\s*Programmer',
+            'test': r'self\.test\s*=\s*Test',
+            'review': r'self\.review\s*=\s*Review',
+            'revise': r'self\.revise\s*=\s*Revise',
+            'scensemble': r'self\.scensemble\s*=\s*ScEnsemble',
+            'custom': r'self\.custom\s*=\s*Custom',
+        }
+
+        initialized = []
+        for op_name, pattern in patterns.items():
+            if re.search(pattern, code):
+                initialized.append(op_name)
+
+        return initialized
 
     def _check_logic_feasibility(self, code: str, problem_type: str) -> List[str]:
         """

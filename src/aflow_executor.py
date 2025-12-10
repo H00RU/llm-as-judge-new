@@ -27,19 +27,7 @@ from scripts.async_llm import create_llm_instance, LLMsConfig
 from scripts import operators as operator_module
 from scripts.evaluator import DatasetType
 
-# 导入Workflow基类（确保生成的code能正确继承）
-try:
-    from .workflow_base import (
-        MathWorkflowBase,
-        CodeWorkflowBase,
-        QAWorkflowBase
-    )
-except ImportError:
-    from workflow_base import (
-        MathWorkflowBase,
-        CodeWorkflowBase,
-        QAWorkflowBase
-    )
+# 自包含架构：不再需要导入基类
 
 
 class AFlowExecutor:
